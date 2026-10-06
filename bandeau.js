@@ -15,21 +15,22 @@
      Menu    (1re ligne uniquement) : Titre (texte), Logo (pièce jointe), Icone (pièce jointe)
      Widget  (1 ligne par lien)     : Titre (texte), URL (texte), Ordre (numérique, facultatif)
 
-   OPTIONS (attributs data-* du <script>, tous facultatifs) :
-     data-titre   Titre de repli si Menu.Titre est vide ou illisible.
-     data-logo    Logo de repli (URL) si Menu.Logo est vide ou illisible.
+   OPTION (attribut data-* du <script>, facultatif) :
      data-cible   Sélecteur CSS du conteneur d'accueil (défaut : début de <body>).
 
+   AUCUNE VALEUR PAR DÉFAUT VISIBLE : ni logo, ni titre n'existent dans ce
+   fichier. Le contenu du bandeau reste masqué tant que la table Menu n'est
+   pas chargée (le logo n'apparaît qu'une fois entièrement téléchargé).
+
    ROBUSTESSE : toute erreur (table absente, jeton refusé, réseau) est
-   absorbée. Le bandeau reste affiché avec ses valeurs de repli et ne bloque
-   jamais le widget hôte.
+   absorbée. Le bandeau s'affiche alors neutre (sans logo ni titre, avec le
+   glyphe ☰) et ne bloque jamais le widget hôte.
    Sans dépendance : n'utilise ni x-dc ni support.js.
    ========================================================== */
 (function () {
   "use strict";
 
   // ---- Configuration (seul endroit à éditer) -------------------------------
-  var LOGO_REPLI = "https://nicolasschena-aucarre.github.io/Logo_Aucarre/logo.png";
   var TABLE_MENU = "Menu";
   var TABLE_WIDGET = "Widget";
   var COL = { titre: "Titre", logo: "Logo", icone: "Icone", url: "URL", ordre: "Ordre" };
@@ -37,7 +38,7 @@
   var PAS_ATTENTE_MS = 250;
   // --------------------------------------------------------------------------
 
-  var VERSION = "2026-10-05-casse-colonnes";
+  var VERSION = "2026-10-06-sans-repli";
   console.info("[bandeau] version " + VERSION);
 
   var script = document.currentScript;
@@ -51,6 +52,8 @@
     "*{box-sizing:border-box}",
     ".pm-header{background:var(--ac-white);color:var(--ac-black);padding:0 24px;border-bottom:1.5px solid var(--ac-black)}",
     ".pm-header-inner{max-width:1240px;margin:0 auto;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:24px;min-height:72px;padding:8px 0}",
+    ".pm-header-inner{visibility:hidden}.pm-pret .pm-header-inner{visibility:visible}",
+    ".pm-brand-logo[hidden]{display:none}",
     ".pm-brand{display:flex;align-items:center}",
     ".pm-brand-logo{height:60px;width:auto;flex:none;display:block}",
     ".pm-titre{margin:0;text-align:center;font-size:16px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
@@ -138,20 +141,18 @@
 
     // Gauche : logo (simple affichage)
     var brand = el("div", "pm-brand");
-    var logo = el("img", "pm-brand-logo", { src: opt.logo || LOGO_REPLI, alt: "au carré" });
-    logo.addEventListener("error", function () {
-      if (logo.src !== LOGO_REPLI) logo.src = LOGO_REPLI;
-    });
+    var logo = el("img", "pm-brand-logo", { alt: "Logo" });
+    logo.hidden = true; // affiché seulement quand Menu.Logo est chargé
     brand.appendChild(logo);
 
     // Centre : titre
     var titre = el("p", "pm-titre");
-    titre.textContent = opt.titre || "";
+    
 
     // Droite : burger + menu
     var wrap = el("div", "pm-burger-wrap");
     var btn = el("button", "pm-burger-btn", {
-      type: "button", "aria-label": "Autres outils internes", "aria-expanded": "false"
+      type: "button", "aria-label": "Menu", "aria-expanded": "false"
     });
     var repli = el("span", "pm-burger-repli", { "aria-hidden": "true" });
     repli.textContent = "☰";
@@ -187,7 +188,7 @@
     var parent = (opt.cible && document.querySelector(opt.cible)) || document.body;
     parent.insertBefore(host, parent.firstChild);
 
-    charger({ logo: logo, titre: titre, btn: btn, repli: repli, menu: menu });
+    charger({ header: header, logo: logo, titre: titre, btn: btn, repli: repli, menu: menu });
   }
 
   // ---------- Chargement des données ----------
@@ -214,9 +215,17 @@
   }
 
   function charger(ui) {
+    var affiche = false;
+    function afficher() {
+      if (affiche) return;
+      affiche = true;
+      ui.header.classList.add("pm-pret");
+    }
+    setTimeout(afficher, ATTENTE_GRIST_MS + 5000); // filet de sécurité
+
     attendreGrist().then(function (grist) {
       // Table Widget -> liens du menu
-      var pWidget = grist.docApi.fetchTable(TABLE_WIDGET).then(function (t) {
+      grist.docApi.fetchTable(TABLE_WIDGET).then(function (t) {
         var liens = lignes(t).map(function (l) {
           return { titre: String(champ(l, COL.titre) || "").trim(), url: urlSure(champ(l, COL.url)), ordre: champ(l, COL.ordre) };
         }).filter(function (l) { return l.titre && l.url; });
@@ -238,8 +247,9 @@
         menuIndisponible(ui.menu);
       });
 
-      // Table Menu -> titre, logo, icône (1re ligne)
-      var pMenu = grist.docApi.fetchTable(TABLE_MENU).then(function (t) {
+      // Table Menu -> titre, logo, icône (1re ligne). Le bandeau s'affiche une
+      // fois cette configuration appliquée (logo téléchargé compris).
+      return grist.docApi.fetchTable(TABLE_MENU).then(function (t) {
         var cfg = lignes(t)[0];
         if (!cfg) return;
         var titre = String(champ(cfg, COL.titre) || "").trim();
@@ -250,8 +260,6 @@
         if (!aLogo && !aIcone) return;
 
         return grist.docApi.getAccessToken({ readOnly: true }).then(function (jeton) {
-          var uLogo = urlPieceJointe(champ(cfg, COL.logo), jeton);
-          if (uLogo) ui.logo.src = uLogo; // en cas d'échec, l'écouteur « error » remet le repli
           var uIcone = urlPieceJointe(champ(cfg, COL.icone), jeton);
           if (uIcone) {
             var img = el("img", "pm-burger-icone", { src: uIcone, alt: "" });
@@ -260,16 +268,21 @@
             });
             ui.btn.replaceChild(img, ui.repli);
           }
+          var uLogo = urlPieceJointe(champ(cfg, COL.logo), jeton);
+          if (!uLogo) return;
+          return new Promise(function (resolve) {
+            ui.logo.onload = function () { ui.logo.hidden = false; resolve(); };
+            ui.logo.onerror = function () { ui.logo.hidden = true; resolve(); };
+            ui.logo.src = uLogo;
+          });
         });
       }).catch(function (e) {
         console.warn("[bandeau] table " + TABLE_MENU + " / pièces jointes :", e);
       });
-
-      return Promise.all([pWidget, pMenu]);
     }).catch(function (e) {
       console.warn("[bandeau] " + e.message);
       menuIndisponible(ui.menu);
-    });
+    }).then(afficher);
   }
 
   if (document.body) construire();
