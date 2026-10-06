@@ -37,6 +37,9 @@
   var PAS_ATTENTE_MS = 250;
   // --------------------------------------------------------------------------
 
+  var VERSION = "2026-10-05-casse-colonnes";
+  console.info("[bandeau] version " + VERSION);
+
   var script = document.currentScript;
   var opt = (script && script.dataset) || {};
 
@@ -79,6 +82,15 @@
       for (var c in table) l[c] = table[c][i];
       return l;
     });
+  }
+
+  // Valeur d'une colonne, sans tenir compte de la casse (« Url » = « URL » = « url »).
+  function champ(ligne, nom) {
+    if (!ligne) return undefined;
+    if (nom in ligne) return ligne[nom];
+    var cible = nom.toLowerCase();
+    for (var k in ligne) if (k.toLowerCase() === cible) return ligne[k];
+    return undefined;
   }
 
   // Pièce jointe : ["L", 12, 13] (ou [12, 13]) -> 12 ; sinon null.
@@ -206,7 +218,7 @@
       // Table Widget -> liens du menu
       var pWidget = grist.docApi.fetchTable(TABLE_WIDGET).then(function (t) {
         var liens = lignes(t).map(function (l) {
-          return { titre: String(l[COL.titre] || "").trim(), url: urlSure(l[COL.url]), ordre: l[COL.ordre] };
+          return { titre: String(champ(l, COL.titre) || "").trim(), url: urlSure(champ(l, COL.url)), ordre: champ(l, COL.ordre) };
         }).filter(function (l) { return l.titre && l.url; });
         if (liens.some(function (l) { return typeof l.ordre === "number"; })) {
           liens.sort(function (a, b) {
@@ -214,6 +226,11 @@
             var ob = typeof b.ordre === "number" ? b.ordre : Infinity;
             return oa - ob;
           });
+        }
+        if (!liens.length) {
+          console.warn("[bandeau] aucune ligne valide dans la table " + TABLE_WIDGET +
+            ". Colonnes reçues : " + Object.keys(t || {}).join(", ") +
+            " ; lignes : " + lignes(t).length + " ; 1re ligne : " + JSON.stringify(lignes(t)[0]));
         }
         remplirMenu(ui.menu, liens);
       }).catch(function (e) {
@@ -225,17 +242,17 @@
       var pMenu = grist.docApi.fetchTable(TABLE_MENU).then(function (t) {
         var cfg = lignes(t)[0];
         if (!cfg) return;
-        var titre = String(cfg[COL.titre] || "").trim();
+        var titre = String(champ(cfg, COL.titre) || "").trim();
         if (titre) ui.titre.textContent = titre;
 
-        var aLogo = premierIdPieceJointe(cfg[COL.logo]) !== null;
-        var aIcone = premierIdPieceJointe(cfg[COL.icone]) !== null;
+        var aLogo = premierIdPieceJointe(champ(cfg, COL.logo)) !== null;
+        var aIcone = premierIdPieceJointe(champ(cfg, COL.icone)) !== null;
         if (!aLogo && !aIcone) return;
 
         return grist.docApi.getAccessToken({ readOnly: true }).then(function (jeton) {
-          var uLogo = urlPieceJointe(cfg[COL.logo], jeton);
+          var uLogo = urlPieceJointe(champ(cfg, COL.logo), jeton);
           if (uLogo) ui.logo.src = uLogo; // en cas d'échec, l'écouteur « error » remet le repli
-          var uIcone = urlPieceJointe(cfg[COL.icone], jeton);
+          var uIcone = urlPieceJointe(champ(cfg, COL.icone), jeton);
           if (uIcone) {
             var img = el("img", "pm-burger-icone", { src: uIcone, alt: "" });
             img.addEventListener("error", function () { // icône illisible : retour au glyphe ☰
