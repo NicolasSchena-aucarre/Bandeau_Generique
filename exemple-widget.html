@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Widget d'exemple avec bandeau</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script src="./bandeau.js" data-titre="Widget d'exemple"></script>
+<style>body{ margin:0; font-family:system-ui,Arial,sans-serif; } main{ padding:16px; min-height:320px; }</style>
+</head>
+<body>
+<main><p>Contenu du widget.</p></main>
+<script>grist.ready({ requiredAccess: "full" });</script>
+</body>
+</html>
