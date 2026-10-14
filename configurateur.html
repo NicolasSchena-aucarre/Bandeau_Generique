@@ -39,6 +39,22 @@
   .diag li{ padding:8px 0; border-top:1px solid #c9c9c9; }
   .aide{ margin-top:4px; color:#3d3d3d; }
   footer{ margin-top:32px; color:#4d4d4d; font-size:13px; }
+  .onglets{ display:flex; gap:8px; flex-wrap:wrap; margin:16px 0 0; padding-bottom:8px; border-bottom:2px solid #c9c9c9; }
+  .onglets button{ background:#fff; color:var(--primaire); }
+  .onglets button[aria-current="true"]{ background:var(--primaire); color:#fff; text-decoration:underline; }
+  .defil{ overflow-x:auto; }
+  table{ border-collapse:collapse; width:100%; }
+  th, td{ text-align:left; padding:8px; border-bottom:1px solid #c9c9c9; vertical-align:middle; }
+  th{ border-bottom:2px solid var(--texte); }
+  .sr{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  button.petit{ padding:4px 10px; font-size:14px; }
+  .rang{ display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+  .panneau{ border:1.5px solid var(--bord); border-radius:8px; padding:8px 16px 16px; margin:16px 0; background:var(--doux); }
+  fieldset{ border:1.5px solid var(--bord); border-radius:8px; margin:16px 0 0; padding:8px 16px 16px; background:#fff; }
+  legend{ font-weight:600; padding:0 4px; }
+  label.coche{ display:flex; gap:8px; align-items:center; font-weight:400; margin:8px 0 0; }
+  input[type="text"]{ font:inherit; padding:6px 8px; border:1.5px solid var(--bord); border-radius:6px; width:100%; max-width:480px; background:#fff; }
+  .vide{ color:#3d3d3d; }
   @media (max-width:600px){ body{ padding:16px; } .etape{ flex-direction:column; gap:8px; } }
 </style>
 </head>
@@ -58,7 +74,7 @@
     <button type="button" id="btn-diag">Vérifier l'installation</button>
     <div id="zone-diag" tabindex="-1"></div>
   </section>
-  <footer>Version 0.1.0 : installation et diagnostic.</footer>
+  <footer>Version 0.2.0 : installation, diagnostic et liens du menu.</footer>
 </main>
 
 <script>
@@ -95,7 +111,8 @@ var PAIRES_CREATION = [["users.table", T_PERSONNES], ["users.email", "Email"], [
 // ==========================================================
 // OUTILS
 // ==========================================================
-var etat = { doc: null, cfg: null, an: null, vue: "etapes", brouillon: null, occupe: false };
+var etat = { doc: null, cfg: null, an: null, vue: "etapes", brouillon: null, occupe: false,
+  onglet: "installation", liens: [], liensErreur: "", rolesConnus: [], form: null, suppr: null, focus: null };
 
 function msg(e) { return e && e.message ? e.message : String(e); }
 function vide(v) { return v === undefined || v === null || v === ""; }
@@ -129,7 +146,7 @@ function erreur(t) { document.getElementById("erreur").textContent = t || ""; }
 // LECTURE DU DOCUMENT
 // ==========================================================
 async function lireDocument() {
-  var noms = ["_grist_Tables", "_grist_Tables_column", "_grist_ACLResources", "_grist_ACLRules"];
+  var noms = ["_grist_Tables", "_grist_Tables_column", "_grist_ACLResources", "_grist_ACLRules", "_grist_Pages", "_grist_Views"];
   var meta = await Promise.all(noms.map(function (n) { return grist.docApi.fetchTable(n).then(lignes); }));
   var parId = {}, tables = {};
   meta[0].forEach(function (t) {
@@ -139,7 +156,11 @@ async function lireDocument() {
     var t = parId[c.parentId];
     if (t && !/^gristHelper_/.test(c.colId) && c.colId !== "manualSort") tables[t].push({ id: c.colId, label: c.label || c.colId, type: c.type });
   });
-  return { tables: tables, ressources: meta[2], regles: meta[3] };
+  var vues = {};
+  meta[5].forEach(function (x) { vues[x.id] = x.name; });
+  var pages = meta[4].map(function (x) { return { viewRef: x.viewRef, nom: vues[x.viewRef] || ("Page " + x.viewRef), indentation: x.indentation || 0, pos: x.pagePos }; })
+    .sort(function (a, b) { return a.pos - b.pos; });
+  return { tables: tables, ressources: meta[2], regles: meta[3], pages: pages };
 }
 
 async function lireConfig(doc) {
@@ -177,6 +198,12 @@ async function charger() {
     etat.doc = await lireDocument();
     etat.cfg = await lireConfig(etat.doc);
     etat.an = analyser(etat.doc, etat.cfg);
+    etat.liens = []; etat.liensErreur = ""; etat.rolesConnus = [];
+    if (etat.an.liensOk) {
+      try { etat.liens = lignes(await grist.docApi.fetchTable(T_LIENS)); }
+      catch (e) { etat.liensErreur = "Lecture de « " + T_LIENS + " » impossible : " + msg(e); }
+      etat.rolesConnus = await lireRoles();
+    }
   } catch (e) {
     etat.doc = null;
     erreur("Lecture du document impossible : " + msg(e) + ". Dans le panneau du widget, réglez l'accès sur « Accès complet au document ».");
@@ -263,13 +290,14 @@ function actionsRegle(doc, table, col) {
   return actions;
 }
 
-async function lancer(fn, succes) {
+async function lancer(fn, succes, focus) {
   if (etat.occupe) return;
   etat.occupe = true; erreur(""); info("Opération en cours…"); rendre();
   try {
     await fn();
     await charger();
     info(succes || "");
+    if (focus) etat.focus = focus;
   } catch (e) {
     info(""); erreur("Opération impossible : " + msg(e));
   }
@@ -288,6 +316,236 @@ async function poserRegle() {
 }
 
 // ==========================================================
+// LIENS DU MENU
+// ==========================================================
+function urlHttps(v) {   // seules les adresses https sont acceptées comme cible
+  v = String(v || "").trim();
+  if (!/^https:\/\/[^\s]+$/i.test(v)) return "";
+  try { return new URL(v).protocol === "https:" ? v : ""; } catch (e) { return ""; }
+}
+function nbGraphemes(s) {   // un emoji compte pour 1, même composé de plusieurs caractères
+  s = String(s || "");
+  if (typeof Intl !== "undefined" && Intl.Segmenter) return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)).length;
+  return Array.from(s).length;
+}
+// Tri par Ordre ; les lignes sans Ordre passent après, dans l'ordre de la table.
+function trierLiens(liens) {
+  return liens.map(function (l, i) { return { l: l, i: i }; }).sort(function (a, b) {
+    var oa = vide(a.l.Ordre), ob = vide(b.l.Ordre);
+    if (oa && ob) return a.i - b.i;
+    if (oa) return 1;
+    if (ob) return -1;
+    return (Number(a.l.Ordre) - Number(b.l.Ordre)) || (a.i - b.i);
+  }).map(function (x) { return x.l; });
+}
+function cibleDe(l) {
+  if (!vide(l.Url)) return { type: "url", url: String(l.Url) };
+  return Number(l.Page) > 0 ? { type: "page", page: Number(l.Page) } : { type: "aucune" };
+}
+function rolesGeres() {   // le champ « Rôles » n'a de sens que si la table des personnes a une colonne de rôle
+  var c = etat.cfg.valeurs["users.role"];
+  return !!(etat.an.usersOk && c && etat.doc.tables[etat.an.table].some(function (k) { return k.id === c; }));
+}
+async function lireRoles() {
+  var set = {}, col = etat.cfg.valeurs["users.role"];
+  function ajouter(v) { if (Array.isArray(v) && v[0] === "C") return; liste(v).forEach(function (r) { set[r] = true; }); }   // ["C"] = cellule masquée
+  if (etat.an.usersOk && col) {
+    try { ((await grist.docApi.fetchTable(etat.an.table))[col] || []).forEach(ajouter); } catch (e) { /* liste partielle */ }
+  }
+  etat.liens.forEach(function (l) { ajouter(l.Roles); });
+  return Object.keys(set).sort(function (a, b) { return a.localeCompare(b, "fr"); });
+}
+function pagesChoisissables() {
+  return etat.doc.pages.filter(function (p) { return p.nom !== T_LIENS && p.nom !== T_CONFIG; });
+}
+
+function formVide() { return { id: null, titre: "", cible: "url", page: "", url: "", roles: [], autre: "", onglet: false, icone: "", actif: true }; }
+function formDepuis(l) {
+  var c = cibleDe(l);
+  return { id: l.id, titre: String(l.Titre || ""), cible: c.type === "page" ? "page" : "url", page: c.page ? String(c.page) : "", url: c.url || "",
+    roles: liste(l.Roles), autre: "", onglet: !!l.Nouvel_onglet, icone: String(l.Icone || ""), actif: !!l.Actif };
+}
+function rolesDuForm(f) {
+  var tous = f.roles.concat(String(f.autre || "").split(/[,;]/)).map(function (r) { return r.trim(); }).filter(Boolean);
+  return tous.filter(function (r, i) { return tous.indexOf(r) === i; });
+}
+function validerLien(f, pages) {
+  if (!f.titre.trim()) return "Le titre est obligatoire.";
+  if (f.titre.trim().length > 60) return "Le titre est trop long (60 caractères maximum).";
+  if (f.cible === "page") {
+    if (!pages.some(function (p) { return String(p.viewRef) === String(f.page); })) return "Choisissez une page du document.";
+  } else if (!urlHttps(f.url)) return "L'adresse doit commencer par https:// (exemple : https://exemple.fr/outil).";
+  if (nbGraphemes(f.icone.trim()) > 2) return "L'icône ne peut contenir que 1 ou 2 caractères (par exemple un emoji : 📊).";
+  return "";
+}
+function valeursLien(f, avecRoles) {
+  var v = { Titre: f.titre.trim(), Url: f.cible === "url" ? urlHttps(f.url) : "", Page: f.cible === "page" ? Number(f.page) : 0,
+    Nouvel_onglet: !!f.onglet, Icone: f.icone.trim(), Actif: !!f.actif };
+  if (avecRoles) { var r = rolesDuForm(f); v.Roles = r.length ? ["L"].concat(r) : null; }   // sans « Roles » : on ne touche pas aux rôles existants
+  return v;
+}
+function actionsLien(f, liens, avecRoles) {
+  var v = valeursLien(f, avecRoles);
+  if (f.id) return [["UpdateRecord", T_LIENS, f.id, v]];
+  v.Ordre = liens.reduce(function (m, l) { return vide(l.Ordre) ? m : Math.max(m, Number(l.Ordre)); }, 0) + 1;   // en dernier
+  return [["AddRecord", T_LIENS, null, v]];
+}
+// Échange avec le voisin puis renumérote tout (1, 2, 3…) : un seul appel, et ça règle les Ordre vides ou en double.
+function actionsDeplacer(liens, id, delta) {
+  var tri = trierLiens(liens), i = tri.findIndex(function (l) { return l.id === id; }), j = i + delta;
+  if (i < 0 || j < 0 || j >= tri.length) return [];
+  var tmp = tri[i]; tri[i] = tri[j]; tri[j] = tmp;
+  return [["BulkUpdateRecord", T_LIENS, tri.map(function (l) { return l.id; }), { Ordre: tri.map(function (l, k) { return k + 1; }) }]];
+}
+function ecrire(actions) { return actions.length ? grist.docApi.applyUserActions(actions) : Promise.resolve(); }
+
+function ouvrirForm(l) {
+  etat.form = l ? formDepuis(l) : Object.assign(formVide(), { cible: pagesChoisissables().length ? "page" : "url" });
+  etat.suppr = null;
+  etat.focus = ["f-titre"];
+  rendre();
+}
+
+function vueOnglets() {
+  function bouton(id, texte) {
+    return h("button", { type: "button", id: "onglet-" + id, "aria-current": etat.onglet === id ? "true" : null, disabled: etat.occupe, texte: texte,
+      onclick: function () { etat.onglet = id; etat.form = null; etat.suppr = null; rendre(); } });
+  }
+  return h("nav", { classe: "onglets", "aria-label": "Sections du configurateur" }, [bouton("installation", "Installation"), bouton("liens", "Liens du menu")]);
+}
+
+function vueLiens() {
+  var liens = trierLiens(etat.liens);
+  var sec = h("section", { "aria-labelledby": "t-liens" }, [
+    h("h2", { id: "t-liens", texte: "Liens du menu" }),
+    h("p", { texte: "Ces liens apparaissent dans le menu du bandeau, dans l'ordre ci-dessous. Vous pouvez aussi les modifier directement dans la table « " + T_LIENS + " »." })
+  ]);
+  if (etat.liensErreur) sec.appendChild(h("p", { classe: "message erreur", texte: etat.liensErreur }));
+  if (etat.form) sec.appendChild(vueFormLien());
+  else sec.appendChild(h("div", { classe: "actions" }, [h("button", { type: "button", id: "btn-ajouter", disabled: etat.occupe, texte: "Ajouter un lien", onclick: function () { ouvrirForm(null); } })]));
+  sec.appendChild(liens.length ? tableLiens(liens) : h("p", { classe: "vide", texte: "Aucun lien pour l'instant. Ajoutez le premier avec le bouton « Ajouter un lien »." }));
+  return sec;
+}
+
+function tableLiens(liens) {
+  var noms = {};
+  etat.doc.pages.forEach(function (p) { noms[p.viewRef] = p.nom; });
+  function petit(id, texte, label, desactive, fn) {
+    return h("button", { type: "button", id: id, classe: "secondaire petit", "aria-label": label, disabled: etat.occupe || desactive, texte: texte, onclick: fn });
+  }
+  var corps = h("tbody");
+  liens.forEach(function (l, i) {
+    var titre = vide(l.Titre) ? "(sans titre)" : String(l.Titre), c = cibleDe(l), roles = liste(l.Roles), actif = !!l.Actif;
+    var cible = c.type === "url" ? c.url : c.type === "page" ? (noms[c.page] ? "Page « " + noms[c.page] + " »" : "Page n° " + c.page + " (introuvable)") : "Aucune cible";
+    var actions;
+    if (etat.suppr === l.id) {
+      actions = h("div", { classe: "rang" }, [
+        h("span", { texte: "Supprimer ce lien ?" }),
+        petit("conf-" + l.id, "Confirmer", "Confirmer la suppression de « " + titre + " »", false, function () {
+          lancer(function () { return ecrire([["RemoveRecord", T_LIENS, l.id]]).then(function () { etat.suppr = null; }); }, "Lien supprimé.", ["btn-ajouter"]);
+        }),
+        petit("annul-" + l.id, "Annuler", "Annuler la suppression de « " + titre + " »", false, function () { etat.suppr = null; etat.focus = ["suppr-" + l.id]; rendre(); })
+      ]);
+    } else {
+      actions = h("div", { classe: "rang" }, [
+        petit("modif-" + l.id, "Modifier", "Modifier « " + titre + " »", false, function () { ouvrirForm(l); }),
+        petit("actif-" + l.id, actif ? "Désactiver" : "Activer", (actif ? "Désactiver" : "Activer") + " « " + titre + " »", false, function () {
+          lancer(function () { return ecrire([["UpdateRecord", T_LIENS, l.id, { Actif: !actif }]]); }, actif ? "Lien désactivé." : "Lien activé.", ["actif-" + l.id]);
+        }),
+        petit("suppr-" + l.id, "Supprimer", "Supprimer « " + titre + " »", false, function () { etat.suppr = l.id; etat.focus = ["conf-" + l.id]; rendre(); })
+      ]);
+    }
+    corps.appendChild(h("tr", {}, [
+      h("td", {}, [h("div", { classe: "rang" }, [
+        String(i + 1),
+        petit("monter-" + l.id, "↑", "Monter « " + titre + " »", i === 0, function () {
+          lancer(function () { return ecrire(actionsDeplacer(etat.liens, l.id, -1)); }, "Ordre modifié.", ["monter-" + l.id, "descendre-" + l.id]);
+        }),
+        petit("descendre-" + l.id, "↓", "Descendre « " + titre + " »", i === liens.length - 1, function () {
+          lancer(function () { return ecrire(actionsDeplacer(etat.liens, l.id, 1)); }, "Ordre modifié.", ["descendre-" + l.id, "monter-" + l.id]);
+        })
+      ])]),
+      h("td", { texte: (vide(l.Icone) ? "" : l.Icone + " ") + titre }),
+      h("td", { texte: cible }),
+      h("td", { texte: roles.length ? roles.join(", ") : "Tout le monde" }),
+      h("td", {}, [h("span", { classe: "badge " + (actif ? "ok" : "avert"), texte: actif ? "Actif" : "Inactif" })]),
+      h("td", {}, [actions])
+    ]));
+  });
+  var tete = h("tr", {}, ["Ordre", "Titre", "Cible", "Visible par", "État", "Actions"].map(function (t) { return h("th", { scope: "col", texte: t }); }));
+  return h("div", { classe: "defil" }, [h("table", {}, [h("caption", { classe: "sr", texte: "Liens du menu, dans l'ordre d'affichage" }), h("thead", {}, [tete]), corps])]);
+}
+
+function vueFormLien() {
+  var f = etat.form, pages = pagesChoisissables(), avecRoles = rolesGeres();
+  var erreurForm = h("p", { role: "alert" });
+  var titre = h("input", { type: "text", id: "f-titre", maxlength: "60", value: f.titre, "aria-required": "true", oninput: function () { f.titre = titre.value; } });
+
+  var selPage = h("select", { id: "f-page", onchange: function () { f.page = selPage.value; } });
+  selPage.appendChild(h("option", { value: "", texte: "— Choisir une page —" }));
+  pages.forEach(function (p) { selPage.appendChild(h("option", { value: String(p.viewRef), texte: (p.indentation > 0 ? "— " : "") + p.nom })); });
+  selPage.value = f.page;
+  var url = h("input", { type: "text", id: "f-url", value: f.url, placeholder: "https://exemple.fr/outil", oninput: function () { f.url = url.value; } });
+  var blocPage = h("div", {}, [h("label", { "for": "f-page", texte: "Page du document" }), selPage]);
+  var blocUrl = h("div", {}, [h("label", { "for": "f-url", texte: "Adresse (https://…)" }), url]);
+  function majCible() { blocPage.hidden = f.cible !== "page"; blocUrl.hidden = f.cible !== "url"; }
+  function radio(val, id, texte, dispo) {
+    var r = h("input", { type: "radio", name: "f-cible", id: id, value: val, checked: f.cible === val, disabled: !dispo, onchange: function () { f.cible = val; majCible(); } });
+    return h("label", { "for": id, classe: "coche" }, [r, texte]);
+  }
+  var champCible = h("fieldset", {}, [
+    h("legend", { texte: "Où mène ce lien ?" }),
+    radio("page", "f-cible-page", "Une page de ce document", pages.length > 0),
+    radio("url", "f-cible-url", "Une adresse externe (site ou autre document Grist)", true),
+    blocPage, blocUrl
+  ]);
+  majCible();
+
+  var champRoles = null;
+  if (avecRoles) {
+    var tous = etat.rolesConnus.concat(f.roles.filter(function (r) { return etat.rolesConnus.indexOf(r) === -1; }));
+    var autre = h("input", { type: "text", id: "f-autre", value: f.autre, oninput: function () { f.autre = autre.value; } });
+    var cases = tous.map(function (r, i) {
+      var c = h("input", { type: "checkbox", id: "f-role-" + i, checked: f.roles.indexOf(r) !== -1, onchange: function () {
+        var k = f.roles.indexOf(r);
+        if (c.checked && k === -1) f.roles.push(r);
+        if (!c.checked && k !== -1) f.roles.splice(k, 1);
+      } });
+      return h("label", { "for": "f-role-" + i, classe: "coche" }, [c, r]);
+    });
+    champRoles = h("fieldset", {}, [
+      h("legend", { texte: "Qui voit ce lien ?" }),
+      h("p", { texte: "Sans rôle coché, le lien est visible par tout le monde. Ce tri masque seulement le lien dans le menu : il ne protège ni la page ni le site visé." })
+    ].concat(cases, [h("label", { "for": "f-autre", texte: "Autres rôles (séparés par des virgules)" }), autre]));
+  }
+
+  var icone = h("input", { type: "text", id: "f-icone", maxlength: "8", value: f.icone, placeholder: "📊", oninput: function () { f.icone = icone.value; } });
+  var onglet = h("input", { type: "checkbox", id: "f-onglet", checked: f.onglet, onchange: function () { f.onglet = onglet.checked; } });
+  var actif = h("input", { type: "checkbox", id: "f-actif", checked: f.actif, onchange: function () { f.actif = actif.checked; } });
+
+  return h("div", { classe: "panneau" }, [
+    h("h3", { texte: f.id ? "Modifier le lien" : "Ajouter un lien" }),
+    h("label", { "for": "f-titre", texte: "Titre (obligatoire)" }), titre,
+    champCible,
+    champRoles,
+    h("label", { "for": "f-icone", texte: "Icône devant le titre (facultatif : un emoji, par exemple 📊)" }), icone,
+    h("label", { "for": "f-onglet", classe: "coche" }, [onglet, "Ouvrir dans un nouvel onglet"]),
+    h("label", { "for": "f-actif", classe: "coche" }, [actif, "Lien actif (affiché dans le menu)"]),
+    erreurForm,
+    h("div", { classe: "actions" }, [
+      h("button", { type: "button", disabled: etat.occupe, texte: "Enregistrer", onclick: function () {
+        var e = validerLien(f, pages);
+        erreurForm.textContent = e;
+        if (e) return;
+        lancer(function () { return ecrire(actionsLien(f, etat.liens, avecRoles)).then(function () { etat.form = null; }); },
+          f.id ? "Lien modifié." : "Lien ajouté.", ["btn-ajouter"]);
+      } }),
+      h("button", { type: "button", classe: "secondaire", disabled: etat.occupe, texte: "Annuler", onclick: function () { etat.form = null; etat.focus = ["btn-ajouter"]; rendre(); } })
+    ])
+  ]);
+}
+
+// ==========================================================
 // AFFICHAGE
 // ==========================================================
 function ouvrirMapping() {
@@ -300,7 +558,20 @@ function rendre() {
   var r = document.getElementById("racine");
   r.textContent = "";
   if (!etat.doc) return;
-  r.appendChild(etat.vue === "mapping" ? vueMapping() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
+  var installe = etat.an.usersOk && etat.an.liensOk;
+  if (etat.vue === "mapping") r.appendChild(vueMapping());
+  else {
+    if (installe) r.appendChild(vueOnglets());
+    r.appendChild(installe && etat.onglet === "liens" ? vueLiens() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
+  }
+  if (etat.focus) {   // un élément reconstruit perd le focus : on le rend à la personne
+    var ids = [].concat(etat.focus);
+    etat.focus = null;
+    for (var i = 0; i < ids.length; i++) {
+      var el = document.getElementById(ids[i]);
+      if (el && !el.disabled) { el.focus(); break; }
+    }
+  }
 }
 
 function vueChoix() {
@@ -406,7 +677,7 @@ function vueEtapes() {
         lancer(function () { return installer(false); }, "Tables créées.");
       } })])] : []),
     etape3,
-    h("p", { texte: "Étape suivante : ajouter des liens dans la table « " + T_LIENS + " » (un éditeur dédié viendra dans une prochaine version)." })
+    an.liensOk ? h("div", { classe: "actions" }, [h("button", { type: "button", disabled: etat.occupe, texte: "Gérer les liens du menu", onclick: function () { etat.onglet = "liens"; rendre(); } })]) : null
   ]);
 }
 
@@ -468,7 +739,7 @@ async function diagnostiquer() {
       var l = lignes(await grist.docApi.fetchTable(T_LIENS));
       var actifs = l.filter(function (x) { return x.Actif && !vide(x.Titre) && (!vide(x.Url) || !vide(x.Page)); });
       if (actifs.length) ajouter("ok", "Liens du menu", actifs.length + " lien(s) actif(s).");
-      else ajouter("avert", "Liens du menu", "Aucun lien actif.", "Ajoutez une ligne dans « " + T_LIENS + " » avec un titre et une adresse (colonne Url) ou un numéro de page.");
+      else ajouter("avert", "Liens du menu", "Aucun lien actif.", "Ajoutez un lien dans l'onglet « Liens du menu ».");
     } catch (e) { ajouter("erreur", "Lecture des liens", "Impossible de lire « " + T_LIENS + " » (" + msg(e) + ").", "Vérifiez que les règles d'accès autorisent la lecture de cette table pour tous les profils."); }
   }
   return r;
@@ -501,7 +772,11 @@ document.getElementById("btn-diag").addEventListener("click", async function () 
   var b = this; b.disabled = true; info("Vérification en cours…");
   try { afficherDiag(await diagnostiquer()); } finally { b.disabled = false; info(""); }
 });
-(async function () { await charger(); rendre(); })();
+(async function () {
+  await charger();
+  if (etat.an && etat.an.usersOk && etat.an.liensOk && etat.an.regle.protege) etat.onglet = "liens";
+  rendre();
+})();
 </script>
 </body>
 </html>
