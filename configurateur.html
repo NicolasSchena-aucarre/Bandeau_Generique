@@ -55,6 +55,7 @@
   label.coche{ display:flex; gap:8px; align-items:center; font-weight:400; margin:8px 0 0; }
   input[type="text"]{ font:inherit; padding:6px 8px; border:1.5px solid var(--bord); border-radius:6px; width:100%; max-width:480px; background:#fff; }
   .vide{ color:#3d3d3d; }
+  textarea{ width:100%; font:12px/1.5 Consolas,monospace; padding:8px; border:1.5px solid var(--bord); border-radius:6px; background:#fff; }
   @media (max-width:600px){ body{ padding:16px; } .etape{ flex-direction:column; gap:8px; } }
 </style>
 </head>
@@ -74,7 +75,7 @@
     <button type="button" id="btn-diag">Vérifier l'installation</button>
     <div id="zone-diag" tabindex="-1"></div>
   </section>
-  <footer>Version 0.2.0 : installation, diagnostic et liens du menu.</footer>
+  <footer>Version 0.3.0 : installation, diagnostic, liens du menu et widgets du document.</footer>
 </main>
 
 <script>
@@ -160,7 +161,10 @@ async function lireDocument() {
   meta[5].forEach(function (x) { vues[x.id] = x.name; });
   var pages = meta[4].map(function (x) { return { viewRef: x.viewRef, nom: vues[x.viewRef] || ("Page " + x.viewRef), indentation: x.indentation || 0, pos: x.pagePos }; })
     .sort(function (a, b) { return a.pos - b.pos; });
-  return { tables: tables, ressources: meta[2], regles: meta[3], pages: pages };
+  var sections = [], colonnesSections = [], sectionsErreur = "";
+  try { var ts = await grist.docApi.fetchTable("_grist_Views_section"); colonnesSections = Object.keys(ts); sections = lignes(ts); }
+  catch (e) { sectionsErreur = msg(e); }
+  return { tables: tables, ressources: meta[2], regles: meta[3], pages: pages, sections: sections, colonnesSections: colonnesSections, sectionsErreur: sectionsErreur };
 }
 
 async function lireConfig(doc) {
@@ -411,7 +415,7 @@ function vueOnglets() {
     return h("button", { type: "button", id: "onglet-" + id, "aria-current": etat.onglet === id ? "true" : null, disabled: etat.occupe, texte: texte,
       onclick: function () { etat.onglet = id; etat.form = null; etat.suppr = null; rendre(); } });
   }
-  return h("nav", { classe: "onglets", "aria-label": "Sections du configurateur" }, [bouton("installation", "Installation"), bouton("liens", "Liens du menu")]);
+  return h("nav", { classe: "onglets", "aria-label": "Sections du configurateur" }, [bouton("installation", "Installation"), bouton("liens", "Liens du menu"), bouton("widgets", "Widgets du document")]);
 }
 
 function vueLiens() {
@@ -546,10 +550,123 @@ function vueFormLien() {
 }
 
 // ==========================================================
+// WIDGETS DU DOCUMENT
+// ==========================================================
+var ACCES = { "full": "Accès complet", "read table": "Lecture de la table", "none": "Aucun accès" };
+
+function jsonSur(v) {
+  if (v && typeof v === "object") return v;
+  try { var x = JSON.parse(v); return x && typeof x === "object" ? x : {}; } catch (e) { return {}; }
+}
+// Les widgets personnalisés sont des « sections » de page de type « custom ». Où Grist range leur adresse et leur
+// niveau d'accès n'est pas documenté : on cherche aux deux endroits connus, et le bouton « données techniques » montre le brut.
+function widgetsPersonnalises(doc) {
+  var pages = {};
+  doc.pages.forEach(function (p) { pages[p.viewRef] = p.nom; });
+  return doc.sections.filter(function (x) { return x.parentKey === "custom"; }).map(function (x) {
+    var opt = jsonSur(x.options), def = jsonSur(opt.customView !== undefined ? opt.customView : x.customView);
+    var url = typeof def.url === "string" ? def.url : "";
+    return { id: x.id, page: pages[x.parentId] || "", titre: String(x.title || ""), url: url, acces: String(def.access || ""),
+      widgetId: String(def.widgetId || ""), builder: /widget-?builder/i.test([url, def.widgetId, x.title].join(" ")), configurateur: /configurateur/i.test(url) };
+  });
+}
+function urlBandeau() { return new URL("bandeau.js", location.href).href; }   // à côté de ce configurateur
+function attr(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function balise(titre) { return '<script src="' + attr(urlBandeau()) + '" data-titre="' + attr(titre) + '"></' + 'script>'; }
+
+async function verifierWidgets() {
+  var verifs = {};
+  await Promise.all(widgetsPersonnalises(etat.doc).map(async function (w) {
+    if (w.configurateur) { verifs[w.id] = { s: "ok", t: "Non concerné" }; return; }
+    if (w.builder) { verifs[w.id] = { s: "avert", t: "Code dans le document : vérification pas encore disponible" }; return; }
+    if (!/^https:\/\//i.test(w.url)) { verifs[w.id] = { s: "avert", t: "Adresse non lisible" }; return; }
+    var ctl = new AbortController(), minuteur = setTimeout(function () { ctl.abort(); }, 8000);
+    try {
+      var rep = await fetch(w.url, { cache: "no-store", signal: ctl.signal });
+      if (!rep.ok) throw new Error("HTTP " + rep.status);
+      verifs[w.id] = /bandeau\.js/i.test(await rep.text()) ? { s: "ok", t: "Bandeau présent" } : { s: "avert", t: "À ajouter" };   // le texte n'est jamais interprété
+    } catch (e) { verifs[w.id] = { s: "avert", t: "Impossible à vérifier (" + msg(e) + ")" }; }
+    finally { clearTimeout(minuteur); }
+  }));
+  etat.verifs = verifs;
+}
+
+function copierBalise(texte) {   // appelé dans le clic : la zone est déjà sélectionnée
+  var fait = false;
+  try { fait = document.execCommand("copy"); } catch (e) { /* indisponible */ }
+  if (fait) { info("Balise copiée dans le presse-papiers."); return; }
+  var sel = "Copie automatique impossible : la balise est sélectionnée, utilisez Ctrl+C.";
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(texte).then(function () { info("Balise copiée dans le presse-papiers."); }, function () { info(sel); });
+  else info(sel);
+}
+function tronquer(v) { return typeof v === "string" && v.length > 1200 ? v.slice(0, 1200) + "… (tronqué, " + v.length + " caractères)" : v; }
+function donneesTechniques() {
+  var doc = etat.doc;
+  return JSON.stringify({
+    colonnes_de_la_table_des_sections: doc.colonnesSections,
+    sections_personnalisees: doc.sections.filter(function (x) { return x.parentKey === "custom"; }).map(function (x) {
+      var o = {}; Object.keys(x).forEach(function (k) { o[k] = tronquer(x[k]); }); return o;
+    }),
+    interprete: widgetsPersonnalises(doc)
+  }, null, 2);
+}
+
+function vueWidgets() {
+  var doc = etat.doc, ws = widgetsPersonnalises(doc), verifs = etat.verifs || {};
+  var sec = h("section", { "aria-labelledby": "t-widgets" }, [
+    h("h2", { id: "t-widgets", texte: "Widgets du document" }),
+    h("p", { texte: "Pour afficher le bandeau, chaque widget personnalisé doit charger le fichier bandeau.js (une ligne à ajouter dans son code) et être réglé sur « Accès complet au document »." }),
+    h("p", {}, ["Adresse du bandeau utilisée dans la balise : ", h("strong", { texte: urlBandeau() })])
+  ]);
+  if (doc.sectionsErreur) sec.appendChild(h("p", { classe: "message erreur", texte: "Lecture des widgets impossible : " + doc.sectionsErreur }));
+  else if (!ws.length) sec.appendChild(h("p", { classe: "vide", texte: "Aucun widget personnalisé dans ce document." }));
+  else {
+    sec.appendChild(h("div", { classe: "actions" }, [h("button", { type: "button", id: "btn-verif", classe: "secondaire", disabled: etat.occupe, texte: "Vérifier la présence du bandeau",
+      onclick: function () { lancer(verifierWidgets, "Vérification terminée.", ["btn-verif"]); } })]));
+    var corps = h("tbody");
+    ws.forEach(function (w) {
+      var v = verifs[w.id], titre = w.titre || "(sans titre)";
+      var type = w.configurateur ? "Ce configurateur" : w.builder ? "Custom Widget Builder (code dans le document)" : (w.url ? w.url : "Adresse non lue");
+      corps.appendChild(h("tr", {}, [
+        h("td", { texte: w.page || "—" }),
+        h("td", { texte: titre }),
+        h("td", { texte: type }),
+        h("td", {}, [h("span", { classe: "badge " + (w.acces === "full" ? "ok" : "avert"), texte: w.acces ? (ACCES[w.acces] || w.acces) : "Non lu" })]),
+        h("td", {}, [v ? h("span", { classe: "badge " + v.s, texte: v.t }) : "Non vérifié"]),
+        h("td", {}, [w.configurateur ? "" : h("button", { type: "button", id: "balise-" + w.id, classe: "secondaire petit", disabled: etat.occupe,
+          "aria-label": "Copier la balise pour « " + (w.page || titre) + " »", texte: "Copier la balise",
+          onclick: function () { etat.balise = { id: w.id, titre: w.page || titre, builder: w.builder, texte: balise(w.page || w.titre) }; etat.focus = ["zone-balise"]; rendre(); copierBalise(etat.balise.texte); } })])
+      ]));
+    });
+    var tete = h("tr", {}, ["Page", "Widget", "Type", "Accès", "Bandeau", "Balise"].map(function (t) { return h("th", { scope: "col", texte: t }); }));
+    sec.appendChild(h("div", { classe: "defil" }, [h("table", {}, [h("caption", { classe: "sr", texte: "Widgets personnalisés du document" }), h("thead", {}, [tete]), corps])]));
+  }
+  if (etat.balise) {
+    sec.appendChild(h("label", { "for": "zone-balise", texte: "Balise pour « " + etat.balise.titre + " »" }));
+    sec.appendChild(h("textarea", { id: "zone-balise", readonly: true, rows: "2", texte: etat.balise.texte }));
+    sec.appendChild(h("p", { texte: etat.balise.builder
+      ? "Widget créé avec le Custom Widget Builder : collez cette ligne dans la partie HTML du widget."
+      : "Collez cette ligne dans le <head> du widget, après le script de l'API Grist (grist-plugin-api.js). Le widget doit aussi appeler grist.ready({ requiredAccess: \"full\" })." }));
+  }
+  sec.appendChild(h("details", {}, [
+    h("summary", { texte: "Données techniques des widgets (pour le support)" }),
+    h("p", { texte: "Contenu brut lu dans le document. Il peut contenir du code de widget : relisez-le avant de le partager." }),
+    h("textarea", { readonly: true, rows: "10", "aria-label": "Données techniques des widgets", texte: donneesTechniques() })
+  ]));
+  return sec;
+}
+
+// ==========================================================
 // AFFICHAGE
 // ==========================================================
 function ouvrirMapping() {
   etat.brouillon = brouillonDepuis(etat.doc, etat.cfg, etat.an);
+  etat.vue = "mapping";
+  rendre();
+}
+
+function ouvrirMappingSur(table) {
+  etat.brouillon = { table: table, cols: deviner(etat.doc.tables[table] || []) };
   etat.vue = "mapping";
   rendre();
 }
@@ -562,14 +679,14 @@ function rendre() {
   if (etat.vue === "mapping") r.appendChild(vueMapping());
   else {
     if (installe) r.appendChild(vueOnglets());
-    r.appendChild(installe && etat.onglet === "liens" ? vueLiens() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
+    r.appendChild(installe && etat.onglet === "liens" ? vueLiens() : installe && etat.onglet === "widgets" ? vueWidgets() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
   }
   if (etat.focus) {   // un élément reconstruit perd le focus : on le rend à la personne
     var ids = [].concat(etat.focus);
     etat.focus = null;
     for (var i = 0; i < ids.length; i++) {
       var el = document.getElementById(ids[i]);
-      if (el && !el.disabled) { el.focus(); break; }
+      if (el && !el.disabled) { el.focus(); if (el.tagName === "TEXTAREA") el.select(); break; }
     }
   }
 }
@@ -580,12 +697,16 @@ function vueChoix() {
     h("h2", { id: "t-choix", texte: "Comment connecter le bandeau à vos personnes ?" }),
     h("p", { texte: "Le bandeau a besoin d'une table qui liste les personnes (adresse e-mail, nom, rôle). Choisissez selon l'état de ce document." }),
     h("div", { classe: "cartes" }, [
-      h("div", { classe: "carte" }, [
+      existe ? h("div", { classe: "carte" }, [
+        h("h3", { texte: "Une table « Utilisateurs » existe déjà" }),
+        h("p", { texte: "Le widget ne crée jamais une table qui porte déjà ce nom. Utilisez-la : ses colonnes seront reconnues automatiquement, et vos données ne sont pas modifiées." }),
+        h("ul", {}, [h("li", { texte: "Seules Bandeau_liens et Bandeau_config sont créées" })]),
+        h("button", { type: "button", disabled: etat.occupe, onclick: function () { ouvrirMappingSur(T_PERSONNES); }, texte: "Utiliser cette table" })
+      ]) : h("div", { classe: "carte" }, [
         h("h3", { texte: "Créer les tables automatiquement" }),
         h("p", { texte: "Pour un document neuf, sans table de personnes." }),
         h("ul", {}, [h("li", { texte: "Utilisateurs (Email, Nom_Complet, Role)" }), h("li", { texte: "Bandeau_liens" }), h("li", { texte: "Bandeau_config" })]),
-        existe ? h("p", { texte: "Une table « Utilisateurs » existe déjà : utilisez-la avec l'autre option." }) : null,
-        h("button", { type: "button", disabled: existe || etat.occupe, onclick: function () { lancer(function () { return installer(true); }, "Tables créées."); }, texte: "Créer les tables" })
+        h("button", { type: "button", disabled: etat.occupe, onclick: function () { lancer(function () { return installer(true); }, "Tables créées."); }, texte: "Créer les tables" })
       ]),
       h("div", { classe: "carte" }, [
         h("h3", { texte: "Utiliser ma table de personnes existante" }),
