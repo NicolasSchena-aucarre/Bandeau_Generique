@@ -578,12 +578,17 @@ function widgetsPersonnalises(doc) {
   });
 }
 
+// Vrai chargement du bandeau : une balise <script src="…/bandeau.js">. Une simple mention du nom (commentaire, texte, chaîne) ne compte pas.
+function aBalise(texte) {
+  return /<script\b[^>]*\bsrc\s*=\s*["'](?:[^"']*\/)?bandeau\.js(?:[?#][^"']*)?["']/i.test(String(texte));
+}
+
 // État du bandeau dans un widget : lu dans le code pour un Builder (déjà dans le document), sinon après « Vérifier ».
 function statutWidget(w, verifs) {
   if (w.configurateur) return { s: "ok", t: "Non concerné", acces: "" };
   if (w.builder) {
     if (!w.codeLu) return { s: "avert", t: "Code du widget illisible", acces: "" };
-    var present = /bandeau\.js/i.test(w.codeHtml + "\n" + w.codeJs);
+    var present = aBalise(w.codeHtml);
     return { s: present ? "ok" : "avert", t: present ? "Bandeau présent" : "À ajouter", acces: w.accesCode,
       builder: true, present: present, marque: w.codeHtml.indexOf(MARQUE) !== -1 };
   }
@@ -645,7 +650,8 @@ async function verifierWidgets() {
       var rep = await fetch(w.url, { cache: "no-store", signal: ctl.signal });
       if (!rep.ok) throw new Error("HTTP " + rep.status);
       var txt = await rep.text(), m = /requiredAccess\s*:\s*["']([^"']+)["']/.exec(txt);   // le texte n'est jamais interprété
-      verifs[w.id] = { s: /bandeau\.js/i.test(txt) ? "ok" : "avert", t: /bandeau\.js/i.test(txt) ? "Bandeau présent" : "À ajouter", acces: m ? m[1] : "" };
+      var present = aBalise(txt);
+      verifs[w.id] = { s: present ? "ok" : "avert", t: present ? "Bandeau présent" : "À ajouter", acces: m ? m[1] : "" };
     } catch (e) { verifs[w.id] = { s: "avert", t: "Impossible à vérifier (" + msg(e) + ")", acces: "" }; }
     finally { clearTimeout(minuteur); }
   }));
