@@ -1,10 +1,13 @@
 /* ==========================================================
-   bandeau.js — bandeau de navigation pour widgets Grist (version 1)
+   bandeau.js — bandeau de navigation pour widgets Grist (version 1.0.0)
+
+   Ce fichier est publié dans le dossier v1/. Les mises à jour de v1/ restent COMPATIBLES : corrections et ajouts
+   seulement. Tout changement qui casserait un widget existant sera publié dans un nouveau dossier (v2/).
 
    UTILISATION, dans le <head> d'un widget personnalisé, APRÈS le script de l'API Grist :
 
      <script src="https://grist.example/grist-plugin-api.js"></script>
-     <script src="https://VOTRE-HEBERGEMENT/bandeau/v1/bandeau.js" data-titre="Nom du widget"></script>
+     <script src="https://VOTRE-HEBERGEMENT/v1/bandeau.js" data-titre="Nom du widget"></script>
 
    et, dans le widget :  grist.ready({ requiredAccess: "full" });
 
@@ -23,7 +26,7 @@
   var NOM = "BandeauMenu";
   if (window[NOM]) return;   // fichier chargé deux fois : une seule instance
 
-  var VERSION = "bandeau-0.1.0";
+  var VERSION = "bandeau-1.0.0";
   var T_CONFIG = "Bandeau_config", T_LIENS = "Bandeau_liens";
   var DELAIS = [0, 400, 1000, 2000, 4000, 8000];   // le widget peut appeler grist.ready() après le chargement de ce fichier
   var DELAI_LECTURE = 5000;                         // une lecture sans réponse est abandonnée puis retentée
