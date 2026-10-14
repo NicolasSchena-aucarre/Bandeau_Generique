@@ -55,6 +55,7 @@
   label.coche{ display:flex; gap:8px; align-items:center; font-weight:400; margin:8px 0 0; }
   input[type="text"]{ font:inherit; padding:6px 8px; border:1.5px solid var(--bord); border-radius:6px; width:100%; max-width:480px; background:#fff; }
   .vide{ color:#3d3d3d; }
+  pre{ white-space:pre-wrap; word-break:break-word; background:#fff; border:1.5px solid var(--bord); border-radius:6px; padding:8px; font:12px/1.5 Consolas,monospace; }
   textarea{ width:100%; font:12px/1.5 Consolas,monospace; padding:8px; border:1.5px solid var(--bord); border-radius:6px; background:#fff; }
   @media (max-width:600px){ body{ padding:16px; } .etape{ flex-direction:column; gap:8px; } }
 </style>
@@ -75,7 +76,7 @@
     <button type="button" id="btn-diag">Vérifier l'installation</button>
     <div id="zone-diag" tabindex="-1"></div>
   </section>
-  <footer>Version 0.3.0 : installation, diagnostic, liens du menu et widgets du document.</footer>
+  <footer>Version 0.4.0 : installation, diagnostic, liens du menu et widgets du document.</footer>
 </main>
 
 <script>
@@ -113,7 +114,7 @@ var PAIRES_CREATION = [["users.table", T_PERSONNES], ["users.email", "Email"], [
 // OUTILS
 // ==========================================================
 var etat = { doc: null, cfg: null, an: null, vue: "etapes", brouillon: null, occupe: false,
-  onglet: "installation", liens: [], liensErreur: "", rolesConnus: [], form: null, suppr: null, focus: null };
+  onglet: "installation", liens: [], liensErreur: "", rolesConnus: [], form: null, suppr: null, ajout: null, balise: null, verifs: {}, focus: null };
 
 function msg(e) { return e && e.message ? e.message : String(e); }
 function vide(v) { return v === undefined || v === null || v === ""; }
@@ -413,7 +414,7 @@ function ouvrirForm(l) {
 function vueOnglets() {
   function bouton(id, texte) {
     return h("button", { type: "button", id: "onglet-" + id, "aria-current": etat.onglet === id ? "true" : null, disabled: etat.occupe, texte: texte,
-      onclick: function () { etat.onglet = id; etat.form = null; etat.suppr = null; rendre(); } });
+      onclick: function () { etat.onglet = id; etat.form = null; etat.suppr = null; etat.ajout = null; rendre(); } });
   }
   return h("nav", { classe: "onglets", "aria-label": "Sections du configurateur" }, [bouton("installation", "Installation"), bouton("liens", "Liens du menu"), bouton("widgets", "Widgets du document")]);
 }
@@ -566,10 +567,70 @@ function widgetsPersonnalises(doc) {
   return doc.sections.filter(function (x) { return x.parentKey === "custom"; }).map(function (x) {
     var opt = jsonSur(x.options), def = jsonSur(opt.customView !== undefined ? opt.customView : x.customView);
     var url = typeof def.url === "string" ? def.url : "";
+    var builder = /widget-?builder/i.test([url, def.widgetId, def.widgetDef && def.widgetDef.url, x.title].join(" "));
+    // Custom Widget Builder : le code du widget est stocké dans le document (customView.widgetOptions._html et _js).
+    var wo = builder && def.widgetOptions && typeof def.widgetOptions === "object" ? def.widgetOptions : null;
+    var html = wo && typeof wo._html === "string" ? wo._html : null, js = wo && typeof wo._js === "string" ? wo._js : "";
+    var m = /requiredAccess\s*:\s*["']([^"']+)["']/.exec((html || "") + "\n" + js);
     return { id: x.id, page: pages[x.parentId] || "", titre: String(x.title || ""), url: url, acces: String(def.access || ""),
-      widgetId: String(def.widgetId || ""), builder: /widget-?builder/i.test([url, def.widgetId, x.title].join(" ")), configurateur: /configurateur/i.test(url) };
+      widgetId: String(def.widgetId || ""), builder: builder, configurateur: /configurateur/i.test(url),
+      codeLu: html !== null, codeHtml: html || "", codeJs: js, accesCode: m ? m[1] : "" };
   });
 }
+
+// État du bandeau dans un widget : lu dans le code pour un Builder (déjà dans le document), sinon après « Vérifier ».
+function statutWidget(w, verifs) {
+  if (w.configurateur) return { s: "ok", t: "Non concerné", acces: "" };
+  if (w.builder) {
+    if (!w.codeLu) return { s: "avert", t: "Code du widget illisible", acces: "" };
+    var present = /bandeau\.js/i.test(w.codeHtml + "\n" + w.codeJs);
+    return { s: present ? "ok" : "avert", t: present ? "Bandeau présent" : "À ajouter", acces: w.accesCode,
+      builder: true, present: present, marque: w.codeHtml.indexOf(MARQUE) !== -1 };
+  }
+  return verifs[w.id] || null;
+}
+
+// Les deux lignes ajoutées dans le code d'un widget Builder : un repère, puis la balise.
+// Le repère permet de les retirer exactement, sans toucher au reste.
+var MARQUE = "<!" + "-- bandeau-navigation --" + ">";
+function insererBalise(html, tag) {
+  var lignes2 = MARQUE + "\n" + tag + "\n", m = /<\/head\s*>/i.exec(html);
+  return m ? html.slice(0, m.index) + lignes2 + html.slice(m.index) : lignes2 + html;   // sans <head> : au début
+}
+function retirerBalise(html) {
+  var i = html.indexOf(MARQUE);
+  if (i === -1) return html;
+  var fin = html.indexOf("</" + "script>", i);
+  if (fin === -1 || !/bandeau\.js/i.test(html.slice(i, fin))) return html;
+  var j = fin + 9;
+  if (html.charAt(j) === "\r") j++;
+  if (html.charAt(j) === "\n") j++;
+  return html.slice(0, i) + html.slice(j);
+}
+// Réécrit le code HTML dans les options d'une section (chaîne JSON contenant une chaîne JSON).
+function modifierCode(optionsTexte, fn) {
+  var o = JSON.parse(optionsTexte), cvTexte = typeof o.customView === "string", cv = cvTexte ? JSON.parse(o.customView) : o.customView;
+  if (!cv || !cv.widgetOptions || typeof cv.widgetOptions._html !== "string") throw new Error("code du widget introuvable");
+  cv.widgetOptions._html = fn(cv.widgetOptions._html);
+  o.customView = cvTexte ? JSON.stringify(cv) : cv;
+  return JSON.stringify(o);
+}
+function sansHtml(optionsTexte) {   // tout sauf le code HTML : sert à vérifier qu'on n'a rien touché d'autre
+  var o = JSON.parse(optionsTexte), cvTexte = typeof o.customView === "string", cv = cvTexte ? JSON.parse(o.customView) : o.customView;
+  if (cv && cv.widgetOptions) delete cv.widgetOptions._html;
+  o.customView = cvTexte ? JSON.stringify(cv) : cv;
+  return JSON.stringify(o);
+}
+async function ecrireCodeWidget(id, fn) {
+  // Relecture juste avant l'écriture : on part de la version la plus récente du document.
+  var ligne = lignes(await grist.docApi.fetchTable("_grist_Views_section")).filter(function (x) { return x.id === id; })[0];
+  if (!ligne) throw new Error("widget introuvable");
+  var nouveau = modifierCode(ligne.options, fn);
+  if (nouveau === ligne.options) throw new Error("rien à modifier dans ce widget");
+  if (sansHtml(nouveau) !== sansHtml(ligne.options)) throw new Error("modification inattendue : rien n'a été écrit");
+  await grist.docApi.applyUserActions([["UpdateRecord", "_grist_Views_section", id, { options: nouveau }]]);
+}
+
 function urlBandeau() { return new URL("bandeau.js", location.href).href; }   // à côté de ce configurateur
 function attr(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function balise(titre) { return '<script src="' + attr(urlBandeau()) + '" data-titre="' + attr(titre) + '"></' + 'script>'; }
@@ -577,15 +638,15 @@ function balise(titre) { return '<script src="' + attr(urlBandeau()) + '" data-t
 async function verifierWidgets() {
   var verifs = {};
   await Promise.all(widgetsPersonnalises(etat.doc).map(async function (w) {
-    if (w.configurateur) { verifs[w.id] = { s: "ok", t: "Non concerné" }; return; }
-    if (w.builder) { verifs[w.id] = { s: "avert", t: "Code dans le document : vérification pas encore disponible" }; return; }
-    if (!/^https:\/\//i.test(w.url)) { verifs[w.id] = { s: "avert", t: "Adresse non lisible" }; return; }
+    if (w.configurateur || w.builder) return;   // le Builder se lit directement dans le document
+    if (!/^https:\/\//i.test(w.url)) { verifs[w.id] = { s: "avert", t: "Adresse non lisible", acces: "" }; return; }
     var ctl = new AbortController(), minuteur = setTimeout(function () { ctl.abort(); }, 8000);
     try {
       var rep = await fetch(w.url, { cache: "no-store", signal: ctl.signal });
       if (!rep.ok) throw new Error("HTTP " + rep.status);
-      verifs[w.id] = /bandeau\.js/i.test(await rep.text()) ? { s: "ok", t: "Bandeau présent" } : { s: "avert", t: "À ajouter" };   // le texte n'est jamais interprété
-    } catch (e) { verifs[w.id] = { s: "avert", t: "Impossible à vérifier (" + msg(e) + ")" }; }
+      var txt = await rep.text(), m = /requiredAccess\s*:\s*["']([^"']+)["']/.exec(txt);   // le texte n'est jamais interprété
+      verifs[w.id] = { s: /bandeau\.js/i.test(txt) ? "ok" : "avert", t: /bandeau\.js/i.test(txt) ? "Bandeau présent" : "À ajouter", acces: m ? m[1] : "" };
+    } catch (e) { verifs[w.id] = { s: "avert", t: "Impossible à vérifier (" + msg(e) + ")", acces: "" }; }
     finally { clearTimeout(minuteur); }
   }));
   etat.verifs = verifs;
@@ -607,45 +668,80 @@ function donneesTechniques() {
     sections_personnalisees: doc.sections.filter(function (x) { return x.parentKey === "custom"; }).map(function (x) {
       var o = {}; Object.keys(x).forEach(function (k) { o[k] = tronquer(x[k]); }); return o;
     }),
-    interprete: widgetsPersonnalises(doc)
+    interprete: widgetsPersonnalises(doc).map(function (w) { var o = Object.assign({}, w); o.codeHtml = w.codeHtml.length + " caractères"; o.codeJs = w.codeJs.length + " caractères"; return o; })
   }, null, 2);
+}
+
+function vueConfirmationAjout() {
+  var a = etat.ajout, ajouter = a.mode === "ajouter";
+  return h("div", { classe: "panneau", role: "group", "aria-labelledby": "t-ajout" }, [
+    h("h3", { id: "t-ajout", texte: (ajouter ? "Ajouter le bandeau au widget de la page « " : "Retirer le bandeau du widget de la page « ") + a.titre + " »" }),
+    h("p", { texte: ajouter
+      ? "Le code HTML de ce widget (stocké dans le document) sera modifié : ces deux lignes seront ajoutées dans l'en-tête (<head>), ou au début du code si le widget n'en a pas."
+      : "Les deux lignes ajoutées par le configurateur seront retirées du code HTML du widget. Le reste du code n'est pas touché." }),
+    ajouter ? h("pre", { texte: MARQUE + "\n" + balise(a.titre) }) : null,
+    h("p", { texte: "Seul un propriétaire du document peut faire cette modification. Si ce widget est ouvert en édition dans un autre onglet, fermez-le d'abord : il pourrait réécrire son ancien code." }),
+    h("div", { classe: "actions" }, [
+      h("button", { type: "button", id: "conf-ajout", disabled: etat.occupe, texte: "Confirmer", onclick: function () {
+        lancer(function () {
+          return ecrireCodeWidget(a.id, ajouter ? function (code) { return insererBalise(code, balise(a.titre)); } : retirerBalise).then(function () { etat.ajout = null; });
+        }, ajouter ? "Bandeau ajouté au widget. Rechargez la page du widget (F5) pour le voir." : "Bandeau retiré du widget.", ["balise-" + a.id]);
+      } }),
+      h("button", { type: "button", classe: "secondaire", disabled: etat.occupe, texte: "Annuler", onclick: function () { etat.ajout = null; etat.focus = ["balise-" + a.id]; rendre(); } })
+    ])
+  ]);
 }
 
 function vueWidgets() {
   var doc = etat.doc, ws = widgetsPersonnalises(doc), verifs = etat.verifs || {};
   var sec = h("section", { "aria-labelledby": "t-widgets" }, [
     h("h2", { id: "t-widgets", texte: "Widgets du document" }),
-    h("p", { texte: "Pour afficher le bandeau, chaque widget personnalisé doit charger le fichier bandeau.js (une ligne à ajouter dans son code) et être réglé sur « Accès complet au document »." }),
+    h("p", { texte: "Pour afficher le bandeau, chaque widget personnalisé doit charger le fichier bandeau.js (une ligne à ajouter dans son code) et demander l'accès complet au document (grist.ready avec requiredAccess « full »)." }),
     h("p", {}, ["Adresse du bandeau utilisée dans la balise : ", h("strong", { texte: urlBandeau() })])
   ]);
+  function pb(id, texte, label, fn) { return h("button", { type: "button", id: id, classe: "secondaire petit", disabled: etat.occupe, "aria-label": label, texte: texte, onclick: fn }); }
   if (doc.sectionsErreur) sec.appendChild(h("p", { classe: "message erreur", texte: "Lecture des widgets impossible : " + doc.sectionsErreur }));
   else if (!ws.length) sec.appendChild(h("p", { classe: "vide", texte: "Aucun widget personnalisé dans ce document." }));
   else {
-    sec.appendChild(h("div", { classe: "actions" }, [h("button", { type: "button", id: "btn-verif", classe: "secondaire", disabled: etat.occupe, texte: "Vérifier la présence du bandeau",
+    sec.appendChild(h("div", { classe: "actions" }, [h("button", { type: "button", id: "btn-verif", classe: "secondaire", disabled: etat.occupe, texte: "Vérifier les widgets hébergés",
       onclick: function () { lancer(verifierWidgets, "Vérification terminée.", ["btn-verif"]); } })]));
     var corps = h("tbody");
     ws.forEach(function (w) {
-      var v = verifs[w.id], titre = w.titre || "(sans titre)";
+      var st = statutWidget(w, verifs), titre = w.titre || "(sans titre)", nom = w.page || titre;
       var type = w.configurateur ? "Ce configurateur" : w.builder ? "Custom Widget Builder (code dans le document)" : (w.url ? w.url : "Adresse non lue");
+      var actions = [];
+      if (!w.configurateur) {
+        actions.push(pb("balise-" + w.id, "Copier la balise", "Copier la balise pour « " + nom + " »", function () {
+          etat.balise = { id: w.id, titre: nom, builder: w.builder, texte: balise(w.page || w.titre) };
+          etat.focus = ["zone-balise"]; rendre(); copierBalise(etat.balise.texte);
+        }));
+        if (st && st.builder && !st.present) actions.push(pb("ajout-" + w.id, "Ajouter au widget", "Ajouter le bandeau au widget « " + nom + " »", function () {
+          etat.ajout = { id: w.id, mode: "ajouter", titre: nom }; etat.focus = ["conf-ajout"]; rendre();
+        }));
+        if (st && st.builder && st.present && st.marque) actions.push(pb("retrait-" + w.id, "Retirer le bandeau", "Retirer le bandeau du widget « " + nom + " »", function () {
+          etat.ajout = { id: w.id, mode: "retirer", titre: nom }; etat.focus = ["conf-ajout"]; rendre();
+        }));
+      }
+      var cellule = [st ? h("span", { classe: "badge " + st.s, texte: st.t }) : "Non vérifié"];
+      if (st && st.acces && st.acces !== "full") cellule.push(h("div", { classe: "aide", texte: "Le code du widget demande l'accès « " + st.acces + " » : le bandeau ne pourra pas lire les tables. Remplacez-le par « full »." }));
       corps.appendChild(h("tr", {}, [
         h("td", { texte: w.page || "—" }),
         h("td", { texte: titre }),
         h("td", { texte: type }),
         h("td", {}, [h("span", { classe: "badge " + (w.acces === "full" ? "ok" : "avert"), texte: w.acces ? (ACCES[w.acces] || w.acces) : "Non lu" })]),
-        h("td", {}, [v ? h("span", { classe: "badge " + v.s, texte: v.t }) : "Non vérifié"]),
-        h("td", {}, [w.configurateur ? "" : h("button", { type: "button", id: "balise-" + w.id, classe: "secondaire petit", disabled: etat.occupe,
-          "aria-label": "Copier la balise pour « " + (w.page || titre) + " »", texte: "Copier la balise",
-          onclick: function () { etat.balise = { id: w.id, titre: w.page || titre, builder: w.builder, texte: balise(w.page || w.titre) }; etat.focus = ["zone-balise"]; rendre(); copierBalise(etat.balise.texte); } })])
+        h("td", {}, cellule),
+        h("td", {}, [h("div", { classe: "rang" }, actions)])
       ]));
     });
-    var tete = h("tr", {}, ["Page", "Widget", "Type", "Accès", "Bandeau", "Balise"].map(function (t) { return h("th", { scope: "col", texte: t }); }));
+    var tete = h("tr", {}, ["Page", "Widget", "Type", "Accès", "Bandeau", "Actions"].map(function (t) { return h("th", { scope: "col", texte: t }); }));
     sec.appendChild(h("div", { classe: "defil" }, [h("table", {}, [h("caption", { classe: "sr", texte: "Widgets personnalisés du document" }), h("thead", {}, [tete]), corps])]));
   }
+  if (etat.ajout) sec.appendChild(vueConfirmationAjout());
   if (etat.balise) {
     sec.appendChild(h("label", { "for": "zone-balise", texte: "Balise pour « " + etat.balise.titre + " »" }));
     sec.appendChild(h("textarea", { id: "zone-balise", readonly: true, rows: "2", texte: etat.balise.texte }));
     sec.appendChild(h("p", { texte: etat.balise.builder
-      ? "Widget créé avec le Custom Widget Builder : collez cette ligne dans la partie HTML du widget."
+      ? "Widget créé avec le Custom Widget Builder : le bouton « Ajouter au widget » fait cette modification à votre place, ou collez cette ligne dans la partie HTML du widget."
       : "Collez cette ligne dans le <head> du widget, après le script de l'API Grist (grist-plugin-api.js). Le widget doit aussi appeler grist.ready({ requiredAccess: \"full\" })." }));
   }
   sec.appendChild(h("details", {}, [
