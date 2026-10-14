@@ -55,6 +55,8 @@
   label.coche{ display:flex; gap:8px; align-items:center; font-weight:400; margin:8px 0 0; }
   input[type="text"]{ font:inherit; padding:6px 8px; border:1.5px solid var(--bord); border-radius:6px; width:100%; max-width:480px; background:#fff; }
   .vide{ color:#3d3d3d; }
+  iframe.apercu{ width:100%; height:360px; border:1.5px solid var(--bord); border-radius:8px; background:#fff; margin-top:8px; }
+  input[type="color"]{ width:44px; height:36px; padding:2px; border:1.5px solid var(--bord); border-radius:6px; background:#fff; }
   pre{ white-space:pre-wrap; word-break:break-word; background:#fff; border:1.5px solid var(--bord); border-radius:6px; padding:8px; font:12px/1.5 Consolas,monospace; }
   textarea{ width:100%; font:12px/1.5 Consolas,monospace; padding:8px; border:1.5px solid var(--bord); border-radius:6px; background:#fff; }
   @media (max-width:600px){ body{ padding:16px; } .etape{ flex-direction:column; gap:8px; } }
@@ -76,7 +78,7 @@
     <button type="button" id="btn-diag">Vérifier l'installation</button>
     <div id="zone-diag" tabindex="-1"></div>
   </section>
-  <footer>Version 0.4.0 : installation, diagnostic, liens du menu et widgets du document.</footer>
+  <footer>Version 0.5.0 : installation, diagnostic, liens du menu, design et widgets du document.</footer>
 </main>
 
 <script>
@@ -114,7 +116,7 @@ var PAIRES_CREATION = [["users.table", T_PERSONNES], ["users.email", "Email"], [
 // OUTILS
 // ==========================================================
 var etat = { doc: null, cfg: null, an: null, vue: "etapes", brouillon: null, occupe: false,
-  onglet: "installation", liens: [], liensErreur: "", rolesConnus: [], form: null, suppr: null, ajout: null, balise: null, verifs: {}, focus: null };
+  onglet: "installation", liens: [], liensErreur: "", rolesConnus: [], form: null, suppr: null, ajout: null, balise: null, verifs: {}, design: null, apercuRole: "", apercuOuvert: true, baseDoc: "", focus: null };
 
 function msg(e) { return e && e.message ? e.message : String(e); }
 function vide(v) { return v === undefined || v === null || v === ""; }
@@ -208,6 +210,9 @@ async function charger() {
       try { etat.liens = lignes(await grist.docApi.fetchTable(T_LIENS)); }
       catch (e) { etat.liensErreur = "Lecture de « " + T_LIENS + " » impossible : " + msg(e); }
       etat.rolesConnus = await lireRoles();
+      if (etat.liens.some(function (l) { return vide(l.Url) && Number(l.Page) > 0; })) {   // pour l'aperçu des liens vers des pages
+        try { etat.baseDoc = (await grist.docApi.getAccessToken({ readOnly: true })).baseUrl || ""; } catch (e) { etat.baseDoc = ""; }
+      }
     }
   } catch (e) {
     etat.doc = null;
@@ -416,7 +421,7 @@ function vueOnglets() {
     return h("button", { type: "button", id: "onglet-" + id, "aria-current": etat.onglet === id ? "true" : null, disabled: etat.occupe, texte: texte,
       onclick: function () { etat.onglet = id; etat.form = null; etat.suppr = null; etat.ajout = null; rendre(); } });
   }
-  return h("nav", { classe: "onglets", "aria-label": "Sections du configurateur" }, [bouton("installation", "Installation"), bouton("liens", "Liens du menu"), bouton("widgets", "Widgets du document")]);
+  return h("nav", { classe: "onglets", "aria-label": "Sections du configurateur" }, [bouton("installation", "Installation"), bouton("liens", "Liens du menu"), bouton("design", "Design"), bouton("widgets", "Widgets du document")]);
 }
 
 function vueLiens() {
@@ -759,6 +764,154 @@ function vueWidgets() {
 }
 
 // ==========================================================
+// DESIGN DU BANDEAU
+// ==========================================================
+var DEF_DESIGN = { titre: "", logo: "", fond: "#ffffff", texte: "#111111", accent: "#005fcc" };
+var CHAMPS_COULEUR = [
+  { cle: "fond", libelle: "Couleur de fond" },
+  { cle: "texte", libelle: "Couleur du texte" },
+  { cle: "accent", libelle: "Couleur d'accent (burger, avatar, trait du bas)" }
+];
+function hexValide(v) { return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(String(v || "")); }
+function normaliserHex(v) {   // « 005FCC » -> « #005fcc »
+  v = String(v || "").trim().toLowerCase();
+  return /^([0-9a-f]{3}|[0-9a-f]{6})$/.test(v) ? "#" + v : v;
+}
+function hex6(v) {   // #abc -> #aabbcc (le sélecteur de couleur n'accepte que 6 chiffres)
+  v = normaliserHex(v);
+  if (!hexValide(v)) return "#000000";
+  return v.length === 4 ? "#" + v[1] + v[1] + v[2] + v[2] + v[3] + v[3] : v;
+}
+function luminance(hex) {
+  var c = hex6(hex);
+  return [1, 3, 5].map(function (i) {
+    var x = parseInt(c.substr(i, 2), 16) / 255;
+    return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+  }).reduce(function (s, x, i) { return s + x * [0.2126, 0.7152, 0.0722][i]; }, 0);
+}
+function contraste(a, b) {   // rapport de contraste WCAG
+  var la = luminance(a), lb = luminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+function designDepuis(v) {
+  function c(x, d) { x = normaliserHex(x); return hexValide(x) ? x : d; }
+  return { titre: v.titre || "", logo: v.logo_url || "", fond: c(v.couleur_fond, DEF_DESIGN.fond), texte: c(v.couleur_texte, DEF_DESIGN.texte), accent: c(v.couleur_accent, DEF_DESIGN.accent) };
+}
+function validerDesign(d) {
+  if (d.titre.trim().length > 60) return "Le titre est trop long (60 caractères maximum).";
+  if (d.logo.trim() && !urlHttps(d.logo)) return "L'adresse du logo doit commencer par https:// (exemple : https://exemple.fr/logo.png).";
+  var manque = CHAMPS_COULEUR.filter(function (c) { return !hexValide(normaliserHex(d[c.cle])); })[0];
+  return manque ? manque.libelle + " : format attendu #rrggbb (exemple : #005fcc)." : "";
+}
+function versColonnes(lignesTab, ids) {   // l'inverse de lignes() : le bandeau lit des tables en colonnes
+  var t = { id: lignesTab.map(function (l) { return l.id; }) };
+  ids.forEach(function (c) { t[c] = lignesTab.map(function (l) { return l[c]; }); });
+  return t;
+}
+
+// Aperçu : le VRAI bandeau.js tourne dans une iframe isolée, avec un faux « grist » qui lui sert le brouillon
+// (réglages en cours de saisie), les vrais liens du document et une personne fictive.
+function htmlApercu() {
+  var d = etat.design, role = etat.apercuRole || "";
+  var cfg = [["titre", d.titre.trim()], ["logo_url", d.logo.trim()], ["couleur_fond", normaliserHex(d.fond)], ["couleur_texte", normaliserHex(d.texte)],
+    ["couleur_accent", normaliserHex(d.accent)], ["users.table", "Apercu"], ["users.email", "Email"], ["users.nom_complet", "Nom_Complet"], ["users.role", "Role"]];
+  var donnees = {
+    tables: {
+      Bandeau_config: { id: cfg.map(function (_, i) { return i + 1; }), Cle: cfg.map(function (p) { return p[0]; }), Valeur: cfg.map(function (p) { return p[1]; }) },
+      Bandeau_liens: versColonnes(etat.liens, COLS_LIENS.map(function (c) { return c.id; })),
+      Apercu: { id: [1], Email: ["apercu@exemple.fr"], Nom_Complet: ["Prénom Nom"], Role: [role ? ["L", role] : null] }
+    },
+    base: etat.baseDoc || "https://exemple.fr/o/docs/api/docs/apercu"
+  };
+  var json = JSON.stringify(donnees).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  var fin = "<\/script>";
+  return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>body{margin:0;font-family:system-ui,Arial,sans-serif;color:#59736e}p{padding:24px}</style>" +
+    "<script>var D=" + json + ";window.grist={docApi:{fetchTable:function(n){return D.tables[n]?Promise.resolve(D.tables[n]):Promise.reject(new Error('Table not found: '+n));}," +
+    "getAccessToken:function(){return Promise.resolve({baseUrl:D.base,token:''});}}};" + fin +
+    "<script src=\"" + attr(urlBandeau()) + "\" data-titre=\"Nom du widget\">" + fin + "</head><body><p>Contenu du widget…</p>" +
+    (etat.apercuOuvert === false ? "" :
+      "<script>(function(){var t=0,iv=setInterval(function(){var h=document.getElementById('bm-bandeau'),b=h&&h.shadowRoot&&h.shadowRoot.querySelector('.bm-burger-wrap:not([hidden]) .bm-burger');" +
+      "if(b){b.click();clearInterval(iv);}else if(++t>40){clearInterval(iv);}},100);})();" + fin) +
+    "</body></html>";
+}
+
+function vueDesign() {
+  if (!etat.design) etat.design = designDepuis(etat.cfg.valeurs);
+  var d = etat.design, minuteur = null;
+  var erreurForm = h("p", { role: "alert" });
+  var apercu = h("iframe", { id: "apercu", title: "Aperçu du bandeau", sandbox: "allow-scripts", classe: "apercu" });
+  var cTexte = h("p", { id: "contraste-texte" }), cAccent = h("p", { id: "contraste-accent" });
+
+  function ligneContraste(el, libelle, a, b) {
+    el.textContent = "";
+    a = normaliserHex(a); b = normaliserHex(b);
+    if (!hexValide(a) || !hexValide(b)) { el.appendChild(document.createTextNode(libelle + " : saisissez deux couleurs valides pour calculer le contraste.")); return; }
+    var c = contraste(a, b), bon = c >= 4.5;
+    el.appendChild(h("span", { classe: "badge " + (bon ? "ok" : "avert"), texte: bon ? "Lisible" : "À vérifier" }));
+    el.appendChild(document.createTextNode(" " + libelle + " : " + (Math.round(c * 10) / 10).toString().replace(".", ",") + ":1" + (bon ? "" : " (minimum conseillé : 4,5:1)")));
+  }
+  function maj() {
+    ligneContraste(cTexte, "Texte sur fond", d.texte, d.fond);
+    ligneContraste(cAccent, "Accent sur fond (initiales de l'avatar)", d.accent, d.fond);
+    clearTimeout(minuteur);
+    minuteur = setTimeout(function () { apercu.setAttribute("srcdoc", htmlApercu()); }, 250);
+  }
+
+  var titre = h("input", { type: "text", id: "d-titre", maxlength: "60", value: d.titre, oninput: function () { d.titre = titre.value; maj(); } });
+  var logo = h("input", { type: "text", id: "d-logo", value: d.logo, placeholder: "https://exemple.fr/logo.png", oninput: function () { d.logo = logo.value; maj(); } });
+  var champs = CHAMPS_COULEUR.map(function (c) {
+    var texte = h("input", { type: "text", id: "d-" + c.cle, maxlength: "7", value: d[c.cle] });
+    var pipette = h("input", { type: "color", id: "d-" + c.cle + "-pick", "aria-label": "Choisir : " + c.libelle, value: hex6(d[c.cle]) });
+    texte.addEventListener("input", function () { d[c.cle] = texte.value; if (hexValide(normaliserHex(texte.value))) pipette.value = hex6(texte.value); maj(); });
+    pipette.addEventListener("input", function () { d[c.cle] = pipette.value; texte.value = pipette.value; maj(); });
+    return h("div", {}, [h("label", { "for": "d-" + c.cle, texte: c.libelle }), h("div", { classe: "rang" }, [pipette, texte])]);
+  });
+
+  var ouvert = h("input", { type: "checkbox", id: "d-ouvert", checked: etat.apercuOuvert !== false, onchange: function () { etat.apercuOuvert = ouvert.checked; maj(); } });
+  var roles = etat.rolesConnus;
+  var choixRole = null;
+  if (rolesGeres() && roles.length) {
+    var sel = h("select", { id: "d-role", onchange: function () { etat.apercuRole = sel.value; maj(); } });
+    sel.appendChild(h("option", { value: "", texte: "(aucun rôle)" }));
+    roles.forEach(function (r) { sel.appendChild(h("option", { value: r, texte: r })); });
+    sel.value = etat.apercuRole || "";
+    choixRole = h("div", {}, [h("label", { "for": "d-role", texte: "Voir le menu en tant que" }), sel]);
+  }
+
+  var sec = h("section", { "aria-labelledby": "t-design" }, [
+    h("h2", { id: "t-design", texte: "Design du bandeau" }),
+    h("p", { texte: "Réglages essentiels, communs à tous les widgets qui affichent le bandeau. Ils sont pris en compte au prochain chargement de chaque widget." }),
+    h("label", { "for": "d-titre", texte: "Titre du menu (facultatif, 60 caractères maximum)" }), titre,
+    h("label", { "for": "d-logo", texte: "Adresse du logo (facultatif, en https://)" }), logo,
+    h("p", { classe: "vide", texte: "Le logo doit être accessible publiquement. S'il n'apparaît pas dans l'aperçu, vérifiez l'adresse." })
+  ].concat(champs, [
+    cTexte, cAccent,
+    erreurForm,
+    h("div", { classe: "actions" }, [
+      h("button", { type: "button", id: "btn-design-enreg", disabled: etat.occupe, texte: "Enregistrer le design", onclick: function () {
+        d.fond = normaliserHex(d.fond); d.texte = normaliserHex(d.texte); d.accent = normaliserHex(d.accent);
+        var e = validerDesign(d);
+        erreurForm.textContent = e;
+        if (e) return;
+        lancer(function () {
+          var paires = [["titre", d.titre.trim()], ["logo_url", d.logo.trim()], ["couleur_fond", d.fond], ["couleur_texte", d.texte], ["couleur_accent", d.accent]];
+          return ecrire(actionsInstallation(etat.doc, etat.cfg, { creerPersonnes: false, paires: paires })).then(function () { etat.design = null; });
+        }, "Design enregistré. Rechargez les widgets pour le voir.", ["btn-design-enreg"]);
+      } }),
+      h("button", { type: "button", classe: "secondaire", disabled: etat.occupe, texte: "Annuler les modifications", onclick: function () { etat.design = null; etat.focus = ["btn-design-enreg"]; rendre(); } }),
+      h("button", { type: "button", classe: "secondaire", disabled: etat.occupe, texte: "Rétablir les valeurs par défaut", onclick: function () { etat.design = Object.assign({}, DEF_DESIGN); etat.focus = ["btn-design-enreg"]; rendre(); } })
+    ]),
+    h("h3", { texte: "Aperçu" }),
+    h("p", { classe: "vide", texte: "L'aperçu utilise le vrai fichier bandeau.js, avec vos liens et les réglages ci-dessus, même non enregistrés. Les liens de l'aperçu ne mènent nulle part." }),
+    h("div", { classe: "rang" }, [h("label", { "for": "d-ouvert", classe: "coche" }, [ouvert, "Afficher le menu ouvert"])]),
+    choixRole,
+    apercu
+  ]));
+  maj();
+  return sec;
+}
+
+// ==========================================================
 // AFFICHAGE
 // ==========================================================
 function ouvrirMapping() {
@@ -781,7 +934,7 @@ function rendre() {
   if (etat.vue === "mapping") r.appendChild(vueMapping());
   else {
     if (installe) r.appendChild(vueOnglets());
-    r.appendChild(installe && etat.onglet === "liens" ? vueLiens() : installe && etat.onglet === "widgets" ? vueWidgets() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
+    r.appendChild(installe && etat.onglet === "liens" ? vueLiens() : installe && etat.onglet === "design" ? vueDesign() : installe && etat.onglet === "widgets" ? vueWidgets() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
   }
   if (etat.focus) {   // un élément reconstruit perd le focus : on le rend à la personne
     var ids = [].concat(etat.focus);
