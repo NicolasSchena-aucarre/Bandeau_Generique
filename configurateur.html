@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Configurer le bandeau de navigation</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+  :root{ --texte:#1a1a1a; --fond:#ffffff; --bord:#595959; --doux:#f4f5f7; --primaire:#0b4fbf; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; padding:24px; font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif; color:var(--texte); background:var(--fond); }
+  h1{ font-size:22px; margin:0 0 4px; }
+  h2{ font-size:18px; margin:24px 0 8px; }
+  h3{ font-size:15px; margin:0 0 4px; }
+  p{ margin:0 0 8px; }
+  .sous-titre{ color:#3d3d3d; margin-bottom:16px; }
+  button{ font:inherit; font-weight:600; padding:8px 16px; border-radius:6px; border:2px solid var(--primaire); background:var(--primaire); color:#fff; cursor:pointer; }
+  button.secondaire{ background:#fff; color:var(--primaire); }
+  button:disabled{ border-color:#8c8c8c; background:#e9e9e9; color:#4d4d4d; cursor:not-allowed; }
+  :focus-visible{ outline:3px solid #000; outline-offset:2px; }
+  .actions{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .message{ padding:8px 16px; border:1.5px solid var(--bord); border-radius:8px; background:var(--doux); margin:8px 0; }
+  .message:empty{ display:none; }
+  .message.erreur{ border-color:#b00020; background:#fdecee; }
+  .cartes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; margin:16px 0; }
+  .carte{ border:1.5px solid var(--bord); border-radius:8px; padding:16px; }
+  .carte ul{ padding-left:20px; margin:8px 0 16px; }
+  .etape{ display:flex; gap:16px; align-items:flex-start; padding:16px 0; border-top:1px solid #c9c9c9; }
+  .etape > div{ flex:1; min-width:0; }
+  .badge{ display:inline-block; min-width:84px; text-align:center; padding:2px 8px; border-radius:12px; font-size:13px; font-weight:700; border:1.5px solid; }
+  .badge.ok{ background:#e3f3e8; color:#0b4d22; border-color:#0b4d22; }
+  .badge.avert{ background:#fff3dc; color:#6b3b00; border-color:#6b3b00; }
+  .badge.erreur{ background:#fdecee; color:#8a0019; border-color:#8a0019; }
+  label{ display:block; font-weight:600; margin:16px 0 4px; }
+  select{ font:inherit; padding:6px 8px; border:1.5px solid var(--bord); border-radius:6px; background:#fff; min-width:260px; max-width:100%; }
+  details{ margin-top:8px; }
+  summary{ cursor:pointer; font-weight:600; }
+  .diag{ list-style:none; padding:0; margin:8px 0; }
+  .diag li{ padding:8px 0; border-top:1px solid #c9c9c9; }
+  .aide{ margin-top:4px; color:#3d3d3d; }
+  footer{ margin-top:32px; color:#4d4d4d; font-size:13px; }
+  @media (max-width:600px){ body{ padding:16px; } .etape{ flex-direction:column; gap:8px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Configurer le bandeau de navigation</h1>
+    <p class="sous-titre">Connectez le bandeau aux personnes et aux liens de ce document Grist.</p>
+    <button type="button" class="secondaire" id="btn-actualiser">Actualiser l'état</button>
+  </header>
+  <div id="info" class="message" role="status"></div>
+  <div id="erreur" class="message erreur" role="alert"></div>
+  <div id="racine"></div>
+  <section aria-labelledby="t-diag">
+    <h2 id="t-diag">Vérifier l'installation</h2>
+    <p>Le diagnostic montre ce que voit la personne qui l'exécute. Pour tester un autre profil, ouvrez le document avec ce compte.</p>
+    <button type="button" id="btn-diag">Vérifier l'installation</button>
+    <div id="zone-diag" tabindex="-1"></div>
+  </section>
+  <footer>Version 0.1.0 : installation et diagnostic.</footer>
+</main>
+
+<script>
+"use strict";
+
+// ==========================================================
+// CONSTANTES : structure des tables
+// ==========================================================
+var T_LIENS = "Bandeau_liens", T_CONFIG = "Bandeau_config", T_PERSONNES = "Utilisateurs";
+
+var COLS_LIENS = [
+  { id: "Titre", type: "Text" }, { id: "Url", type: "Text" }, { id: "Page", type: "Int" },
+  { id: "Ordre", type: "Numeric" }, { id: "Roles", type: "ChoiceList" }, { id: "Nouvel_onglet", type: "Bool" },
+  { id: "Icone", type: "Text" },
+  { id: "Actif", type: "Bool", isFormula: false, formula: "True" }   // coché par défaut sur les nouvelles lignes
+];
+var COLS_CONFIG = [{ id: "Cle", type: "Text" }, { id: "Valeur", type: "Text" }];
+var COLS_PERSONNES = [{ id: "Email", type: "Text" }, { id: "Nom_Complet", type: "Text" }, { id: "Role", type: "ChoiceList" }];
+
+// Réglages créés avec leur valeur par défaut (jamais écrasés s'ils existent déjà).
+var CONFIG_DEFAUT = [["titre", ""], ["logo_url", ""], ["couleur_fond", "#ffffff"], ["couleur_texte", "#111111"], ["couleur_accent", "#005fcc"]];
+
+// Champs de la table des personnes : clé de configuration, libellé, reconnaissance automatique.
+var CHAMPS = [
+  { cle: "users.email", libelle: "Adresse e-mail", requis: true, devine: /mail|courriel/i },
+  { cle: "users.nom_complet", libelle: "Nom complet", devine: /nom.?complet|full.?name/i },
+  { cle: "users.prenom", libelle: "Prénom", devine: /pr[eé]nom|first/i },
+  { cle: "users.nom", libelle: "Nom", devine: /^nom$|^name$|nom.?famille|last/i },
+  { cle: "users.role", libelle: "Rôle", devine: /r[oô]le|profil|droit/i }
+];
+var PAIRES_CREATION = [["users.table", T_PERSONNES], ["users.email", "Email"], ["users.nom_complet", "Nom_Complet"],
+  ["users.prenom", ""], ["users.nom", ""], ["users.role", "Role"]];
+
+// ==========================================================
+// OUTILS
+// ==========================================================
+var etat = { doc: null, cfg: null, an: null, vue: "etapes", brouillon: null, occupe: false };
+
+function msg(e) { return e && e.message ? e.message : String(e); }
+function vide(v) { return v === undefined || v === null || v === ""; }
+function emailLisible(v) { return typeof v === "string" && v.indexOf("@") > 0; }   // une cellule masquée n'est pas une adresse
+function liste(v) {
+  if (typeof v === "string") return v.trim() ? [v.trim()] : [];
+  if (!Array.isArray(v)) return [];
+  return (v[0] === "L" ? v.slice(1) : v).filter(function (x) { return !vide(x); });
+}
+function lignes(t) {   // fetchTable renvoie des colonnes ; on repasse en lignes
+  var cles = Object.keys(t).filter(function (c) { return c !== "id"; });
+  return t.id.map(function (id, i) { var l = { id: id }; cles.forEach(function (c) { l[c] = t[c][i]; }); return l; });
+}
+function h(tag, attrs, enfants) {   // création d'élément ; le texte passe toujours par textContent
+  var e = document.createElement(tag);
+  Object.keys(attrs || {}).forEach(function (k) {
+    var v = attrs[k];
+    if (v === null || v === undefined || v === false) return;
+    if (k === "texte") e.textContent = v;
+    else if (k === "classe") e.className = v;
+    else if (k.slice(0, 2) === "on") e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? "" : v);
+  });
+  (enfants || []).forEach(function (c) { if (c !== null && c !== undefined) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+  return e;
+}
+function info(t) { document.getElementById("info").textContent = t || ""; }
+function erreur(t) { document.getElementById("erreur").textContent = t || ""; }
+
+// ==========================================================
+// LECTURE DU DOCUMENT
+// ==========================================================
+async function lireDocument() {
+  var noms = ["_grist_Tables", "_grist_Tables_column", "_grist_ACLResources", "_grist_ACLRules"];
+  var meta = await Promise.all(noms.map(function (n) { return grist.docApi.fetchTable(n).then(lignes); }));
+  var parId = {}, tables = {};
+  meta[0].forEach(function (t) {
+    if (!t.summarySourceTable && !/^_grist/.test(t.tableId)) { parId[t.id] = t.tableId; tables[t.tableId] = []; }
+  });
+  meta[1].forEach(function (c) {
+    var t = parId[c.parentId];
+    if (t && !/^gristHelper_/.test(c.colId) && c.colId !== "manualSort") tables[t].push({ id: c.colId, label: c.label || c.colId, type: c.type });
+  });
+  return { tables: tables, ressources: meta[2], regles: meta[3] };
+}
+
+async function lireConfig(doc) {
+  var valeurs = {}, ids = {};
+  if (doc.tables[T_CONFIG]) {
+    try {
+      lignes(await grist.docApi.fetchTable(T_CONFIG)).forEach(function (l) {
+        if (!vide(l.Cle)) { valeurs[l.Cle] = vide(l.Valeur) ? "" : String(l.Valeur); ids[l.Cle] = l.id; }
+      });
+    } catch (e) { /* signalé par le diagnostic */ }
+  }
+  return { valeurs: valeurs, ids: ids };
+}
+
+function chercherRegle(doc, table, col) {
+  var idsRes = doc.ressources.filter(function (r) { return r.tableId === table && String(r.colIds).split(",").indexOf(col) !== -1; })
+    .map(function (r) { return r.id; });
+  var regles = doc.regles.filter(function (r) { return idsRes.indexOf(r.resource) !== -1; });
+  return { regles: regles, protege: regles.some(function (r) { return /-[CRUDS]*R/.test(r.permissionsText || ""); }) };
+}
+
+function analyser(doc, cfg) {
+  var v = cfg.valeurs, a = { table: v["users.table"] || "", colEmail: v["users.email"] || "" };
+  var cols = doc.tables[a.table];
+  a.usersOk = !!(cols && a.colEmail && cols.some(function (c) { return c.id === a.colEmail; }));
+  a.liensOk = !!doc.tables[T_LIENS];
+  a.configOk = !!doc.tables[T_CONFIG];
+  a.regle = a.usersOk ? chercherRegle(doc, a.table, a.colEmail) : null;
+  return a;
+}
+
+async function charger() {
+  erreur("");
+  try {
+    etat.doc = await lireDocument();
+    etat.cfg = await lireConfig(etat.doc);
+    etat.an = analyser(etat.doc, etat.cfg);
+  } catch (e) {
+    etat.doc = null;
+    erreur("Lecture du document impossible : " + msg(e) + ". Dans le panneau du widget, réglez l'accès sur « Accès complet au document ».");
+  }
+}
+
+// ==========================================================
+// MAPPING
+// ==========================================================
+function tablesCandidates() {
+  return Object.keys(etat.doc.tables).filter(function (t) { return t !== T_LIENS && t !== T_CONFIG; });
+}
+function deviner(colonnes) {
+  var res = {}, pris = {};
+  CHAMPS.forEach(function (c) {
+    var t = colonnes.filter(function (k) { return !pris[k.id] && (c.devine.test(k.id) || c.devine.test(k.label)); })[0];
+    if (t) { res[c.cle] = t.id; pris[t.id] = true; }
+  });
+  return res;
+}
+function brouillonDepuis(doc, cfg, an) {
+  if (an.usersOk) {
+    var cols = {};
+    CHAMPS.forEach(function (c) { cols[c.cle] = cfg.valeurs[c.cle] || ""; });
+    return { table: an.table, cols: cols };
+  }
+  var t = tablesCandidates()[0] || "";
+  return { table: t, cols: deviner(doc.tables[t] || []) };
+}
+function validerMapping(b) {
+  if (!b.table) return "Choisissez une table.";
+  if (!b.cols["users.email"]) return "La colonne « Adresse e-mail » est obligatoire : le bandeau s'en sert pour reconnaître la personne connectée.";
+  var vus = {}, doublon = "";
+  CHAMPS.forEach(function (c) {
+    var col = b.cols[c.cle];
+    if (!col) return;
+    if (vus[col]) doublon = col;
+    vus[col] = true;
+  });
+  return doublon ? "Une même colonne ne peut pas servir à deux champs (« " + doublon + " »)." : "";
+}
+function pairesDepuisBrouillon(b) {
+  return [["users.table", b.table]].concat(CHAMPS.map(function (c) { return [c.cle, b.cols[c.cle] || ""]; }));
+}
+
+// ==========================================================
+// ÉCRITURES (chaque écriture = UN appel : un rechargement du widget ne la coupe pas en deux)
+// ==========================================================
+function actionsInstallation(doc, cfg, opts) {
+  var actions = [];
+  if (opts.creerPersonnes) actions.push(["AddTable", T_PERSONNES, COLS_PERSONNES]);
+  if (!doc.tables[T_LIENS]) actions.push(["AddTable", T_LIENS, COLS_LIENS]);
+  if (!doc.tables[T_CONFIG]) actions.push(["AddTable", T_CONFIG, COLS_CONFIG]);
+  var finale = {}, ordre = [];
+  CONFIG_DEFAUT.forEach(function (p) { if (!(p[0] in cfg.valeurs)) { finale[p[0]] = p[1]; ordre.push(p[0]); } });
+  opts.paires.forEach(function (p) { if (!(p[0] in finale)) ordre.push(p[0]); finale[p[0]] = p[1]; });
+  var ajouts = { Cle: [], Valeur: [] }, majIds = [], majVals = [];
+  ordre.forEach(function (k) {
+    if (k in cfg.ids) {
+      if (cfg.valeurs[k] !== finale[k]) { majIds.push(cfg.ids[k]); majVals.push(finale[k]); }
+    } else { ajouts.Cle.push(k); ajouts.Valeur.push(finale[k]); }
+  });
+  if (ajouts.Cle.length) actions.push(["BulkAddRecord", T_CONFIG, ajouts.Cle.map(function () { return null; }), ajouts]);
+  if (majIds.length) actions.push(["BulkUpdateRecord", T_CONFIG, majIds, { Valeur: majVals }]);
+  return actions;
+}
+
+function actionsRegle(doc, table, col) {
+  var ress = doc.ressources.filter(function (r) { return r.tableId === table && r.colIds === col; })[0];
+  // Un AddRecord reçoit l'identifiant max + 1 : on le prévoit pour poser ressource et règle d'un seul appel.
+  var idRes = ress ? ress.id : doc.ressources.reduce(function (m, x) { return Math.max(m, x.id); }, 0) + 1;
+  var pos = doc.regles.map(function (r) { return r.rulePos; }).filter(function (p) { return typeof p === "number"; });
+  var min = pos.length ? Math.min.apply(null, pos) : 1;
+  var actions = [];
+  if (!ress) actions.push(["AddRecord", "_grist_ACLResources", null, { tableId: table, colIds: col }]);
+  actions.push(["AddRecord", "_grist_ACLRules", null, {
+    resource: idRes,
+    aclFormula: "user.Email != rec." + col,
+    aclFormulaParsed: JSON.stringify(["NotEq", ["Attr", ["Name", "user"], "Email"], ["Attr", ["Name", "rec"], col]]),
+    permissionsText: "-R",
+    rulePos: min > 0 ? min / 2 : min - 1,   // avant les règles existantes
+    memo: "Bandeau de navigation : chaque personne ne voit que son propre e-mail"
+  }]);
+  return actions;
+}
+
+async function lancer(fn, succes) {
+  if (etat.occupe) return;
+  etat.occupe = true; erreur(""); info("Opération en cours…"); rendre();
+  try {
+    await fn();
+    await charger();
+    info(succes || "");
+  } catch (e) {
+    info(""); erreur("Opération impossible : " + msg(e));
+  }
+  etat.occupe = false; rendre();
+}
+
+function installer(creer) {
+  var paires = creer ? PAIRES_CREATION : pairesDepuisBrouillon(etat.brouillon);
+  return grist.docApi.applyUserActions(actionsInstallation(etat.doc, etat.cfg, { creerPersonnes: creer, paires: paires }))
+    .then(function () { etat.vue = "etapes"; });
+}
+async function poserRegle() {
+  await grist.docApi.applyUserActions(actionsRegle(etat.doc, etat.an.table, etat.an.colEmail));
+  await charger();
+  if (!etat.an || !etat.an.regle || !etat.an.regle.protege) throw new Error("la règle n'apparaît pas après l'écriture. Vérifiez dans « Règles d'accès ».");
+}
+
+// ==========================================================
+// AFFICHAGE
+// ==========================================================
+function ouvrirMapping() {
+  etat.brouillon = brouillonDepuis(etat.doc, etat.cfg, etat.an);
+  etat.vue = "mapping";
+  rendre();
+}
+
+function rendre() {
+  var r = document.getElementById("racine");
+  r.textContent = "";
+  if (!etat.doc) return;
+  r.appendChild(etat.vue === "mapping" ? vueMapping() : (etat.an.usersOk ? vueEtapes() : vueChoix()));
+}
+
+function vueChoix() {
+  var doc = etat.doc, candidates = tablesCandidates(), existe = !!doc.tables[T_PERSONNES];
+  return h("section", { "aria-labelledby": "t-choix" }, [
+    h("h2", { id: "t-choix", texte: "Comment connecter le bandeau à vos personnes ?" }),
+    h("p", { texte: "Le bandeau a besoin d'une table qui liste les personnes (adresse e-mail, nom, rôle). Choisissez selon l'état de ce document." }),
+    h("div", { classe: "cartes" }, [
+      h("div", { classe: "carte" }, [
+        h("h3", { texte: "Créer les tables automatiquement" }),
+        h("p", { texte: "Pour un document neuf, sans table de personnes." }),
+        h("ul", {}, [h("li", { texte: "Utilisateurs (Email, Nom_Complet, Role)" }), h("li", { texte: "Bandeau_liens" }), h("li", { texte: "Bandeau_config" })]),
+        existe ? h("p", { texte: "Une table « Utilisateurs » existe déjà : utilisez-la avec l'autre option." }) : null,
+        h("button", { type: "button", disabled: existe || etat.occupe, onclick: function () { lancer(function () { return installer(true); }, "Tables créées."); }, texte: "Créer les tables" })
+      ]),
+      h("div", { classe: "carte" }, [
+        h("h3", { texte: "Utiliser ma table de personnes existante" }),
+        h("p", { texte: "Pour un document déjà en service : vous indiquez la table et les colonnes à utiliser. Vos données ne sont pas modifiées." }),
+        h("ul", {}, [h("li", { texte: "Seules Bandeau_liens et Bandeau_config sont créées" }), h("li", { texte: "Le mapping reste modifiable ensuite" })]),
+        candidates.length ? null : h("p", { texte: "Ce document ne contient aucune table de personnes à relier." }),
+        h("button", { type: "button", disabled: !candidates.length || etat.occupe, onclick: ouvrirMapping, texte: "Configurer le mapping" })
+      ])
+    ]),
+    h("p", { texte: "Chaque table créée apparaît aussi comme une page du document." })
+  ]);
+}
+
+function vueMapping() {
+  var doc = etat.doc, b = etat.brouillon, selects = [];
+  var erreurForm = h("p", { role: "alert" });
+  var selTable = h("select", { id: "m-table", onchange: function () { b.table = selTable.value; b.cols = deviner(doc.tables[b.table] || []); peupler(); } });
+  tablesCandidates().forEach(function (t) { selTable.appendChild(h("option", { value: t, texte: t })); });
+  selTable.value = b.table;
+  var sec = h("section", { "aria-labelledby": "t-map" }, [
+    h("h2", { id: "t-map", texte: "Indiquer votre table des personnes" }),
+    h("p", { texte: "Choisissez la table qui contient les personnes, puis les colonnes à utiliser. Vos données ne sont pas modifiées." }),
+    h("label", { "for": "m-table", texte: "Table des personnes" }), selTable
+  ]);
+  CHAMPS.forEach(function (c, i) {
+    var s = h("select", { id: "m-c" + i, "aria-required": c.requis ? "true" : null, onchange: function () { b.cols[c.cle] = s.value; } });
+    selects.push(s);
+    sec.appendChild(h("label", { "for": "m-c" + i, texte: c.libelle + (c.requis ? " (obligatoire)" : " (facultatif)") }));
+    sec.appendChild(s);
+  });
+  function peupler() {
+    var cols = doc.tables[b.table] || [];
+    CHAMPS.forEach(function (c, i) {
+      var s = selects[i];
+      s.textContent = "";
+      s.appendChild(h("option", { value: "", texte: c.requis ? "— Choisir une colonne —" : "— Non utilisé —" }));
+      cols.forEach(function (k) { s.appendChild(h("option", { value: k.id, texte: k.id + (k.label && k.label !== k.id ? " (" + k.label + ")" : "") })); });
+      s.value = b.cols[c.cle] || "";
+    });
+  }
+  peupler();
+  sec.appendChild(h("p", { texte: "Si vous changez de table ou de colonne e-mail, la règle d'accès devra être posée de nouveau ; l'ancienne règle n'est pas supprimée automatiquement." }));
+  sec.appendChild(erreurForm);
+  sec.appendChild(h("div", { classe: "actions" }, [
+    h("button", { type: "button", disabled: etat.occupe, texte: "Enregistrer et continuer", onclick: function () {
+      var e = validerMapping(b);
+      erreurForm.textContent = e;
+      if (!e) lancer(function () { return installer(false); }, "Configuration enregistrée.");
+    } }),
+    h("button", { type: "button", classe: "secondaire", disabled: etat.occupe, texte: "Annuler", onclick: function () { etat.vue = "etapes"; rendre(); } })
+  ]));
+  return sec;
+}
+
+function vueEtapes() {
+  var an = etat.an, doc = etat.doc, v = etat.cfg.valeurs;
+  function etape(titre, ok, detail, actions) {
+    return h("div", { classe: "etape" }, [
+      h("span", { classe: "badge " + (ok ? "ok" : "avert"), texte: ok ? "Fait" : "À faire" }),
+      h("div", {}, [h("h3", { texte: titre }), h("p", { texte: detail })].concat(actions || []))
+    ]);
+  }
+  var champsChoisis = CHAMPS.filter(function (c) { return v[c.cle]; }).map(function (c) { return c.libelle + " : « " + v[c.cle] + " »"; });
+  var manquantes = [!an.liensOk ? T_LIENS : null, !an.configOk ? T_CONFIG : null].filter(Boolean);
+  var etape3;
+  if (an.regle.protege) {
+    etape3 = etape("3. Règle d'accès", true, "Une règle interdit la lecture de la colonne « " + an.colEmail + " » aux autres lignes de la table « " + an.table + " ». Chaque personne ne voit que son propre e-mail.");
+  } else {
+    var nb = doc.ressources.filter(function (r) { return r.tableId === an.table; }).length;
+    etape3 = etape("3. Règle d'accès", false,
+      "Pour reconnaître la personne connectée, la colonne « " + an.colEmail + " » de la table « " + an.table + " » ne doit être lisible que sur sa propre ligne. " +
+      "Règle ajoutée : si l'e-mail de la personne connectée est différent de celui de la ligne, la lecture de cette colonne est refusée.", [
+        h("p", { texte: "Règles déjà présentes sur cette table : " + nb + ". Aucune règle existante n'est modifiée ni supprimée. Seul un propriétaire du document peut ajouter une règle ; le widget peut se recharger ensuite." }),
+        h("div", { classe: "actions" }, [h("button", { type: "button", disabled: etat.occupe, texte: "Poser la règle d'accès", onclick: function () { lancer(poserRegle, "Règle d'accès posée."); } })]),
+        h("details", {}, [
+          h("summary", { texte: "Je préfère la poser moi-même" }),
+          h("p", { texte: "Ouvrez « Règles d'accès », ajoutez une règle de colonne pour la table « " + an.table + " », colonne « " + an.colEmail + " », avec la condition  user.Email != rec." + an.colEmail + "  et refusez la lecture. Placez cette règle en première position. Le diagnostic vérifiera ensuite sa présence." })
+        ])
+      ]);
+  }
+  return h("section", { "aria-labelledby": "t-install" }, [
+    h("h2", { id: "t-install", texte: "Installation" }),
+    etape("1. Table des personnes", true, "Table « " + an.table + " ». " + champsChoisis.join(" ; ") + ".", [
+      h("div", { classe: "actions" }, [h("button", { type: "button", classe: "secondaire", disabled: etat.occupe, texte: "Modifier le mapping", onclick: ouvrirMapping })])]),
+    etape("2. Tables du bandeau", !manquantes.length,
+      manquantes.length ? "Tables manquantes : " + manquantes.join(", ") + "." : "Les tables " + T_LIENS + " et " + T_CONFIG + " sont présentes.",
+      manquantes.length ? [h("div", { classe: "actions" }, [h("button", { type: "button", disabled: etat.occupe, texte: "Créer les tables manquantes", onclick: function () {
+        etat.brouillon = brouillonDepuis(doc, etat.cfg, an);
+        lancer(function () { return installer(false); }, "Tables créées.");
+      } })])] : []),
+    etape3,
+    h("p", { texte: "Étape suivante : ajouter des liens dans la table « " + T_LIENS + " » (un éditeur dédié viendra dans une prochaine version)." })
+  ]);
+}
+
+// ==========================================================
+// DIAGNOSTIC
+// ==========================================================
+async function diagnostiquer() {
+  var r = [];
+  function ajouter(statut, nom, detail, aide) { r.push({ statut: statut, nom: nom, detail: detail, aide: aide || "" }); }
+  var doc;
+  try { doc = await lireDocument(); }
+  catch (e) {
+    ajouter("erreur", "Accès au document", "Lecture impossible (" + msg(e) + ").", "Dans le panneau du widget, réglez l'accès sur « Accès complet au document ».");
+    return r;
+  }
+  var cfg = await lireConfig(doc), an = analyser(doc, cfg), v = cfg.valeurs;
+  ajouter("ok", "Accès au document", "Le widget lit la structure du document.");
+
+  [[T_LIENS, COLS_LIENS], [T_CONFIG, COLS_CONFIG]].forEach(function (p) {
+    var cols = doc.tables[p[0]], nom = "Table « " + p[0] + " »";
+    if (!cols) { ajouter("erreur", nom, "Table introuvable.", "Lancez l'installation pour la créer."); return; }
+    var manque = p[1].filter(function (c) { return !cols.some(function (k) { return k.id === c.id; }); }).map(function (c) { return c.id; });
+    if (manque.length) ajouter("erreur", nom, "Colonnes manquantes : " + manque.join(", ") + ".", "Ajoutez ces colonnes avec exactement ces identifiants (sans accent), ou renommez celles qui existent.");
+    else ajouter("ok", nom, "Table et colonnes présentes.");
+  });
+
+  if (!an.table) { ajouter("erreur", "Table des personnes", "Aucune table n'est configurée.", "Lancez l'installation."); return r; }
+  if (!doc.tables[an.table]) { ajouter("erreur", "Table des personnes", "La table « " + an.table + " » n'existe plus.", "Modifiez le mapping dans l'installation."); return r; }
+  if (!an.usersOk) { ajouter("erreur", "Table des personnes", "La colonne e-mail « " + an.colEmail + " » est introuvable dans « " + an.table + " ».", "Modifiez le mapping dans l'installation."); return r; }
+  ajouter("ok", "Table des personnes", "Table « " + an.table + " », e-mail dans la colonne « " + an.colEmail + " ».");
+
+  var cols = doc.tables[an.table], perdues = CHAMPS.filter(function (c) {
+    return c.cle !== "users.email" && v[c.cle] && !cols.some(function (k) { return k.id === v[c.cle]; });
+  }).map(function (c) { return c.libelle + " (« " + v[c.cle] + " »)"; });
+  if (perdues.length) ajouter("avert", "Colonnes facultatives", "Colonnes introuvables : " + perdues.join(", ") + ".", "Modifiez le mapping, ou rétablissez la colonne.");
+
+  var regle = chercherRegle(doc, an.table, an.colEmail);
+  if (regle.protege) ajouter("ok", "Règle d'accès", "Une règle refuse la lecture de « " + an.colEmail + " » (ligne par ligne).");
+  else ajouter("erreur", "Règle d'accès", "Aucune règle ne masque la colonne « " + an.colEmail + " ».", "Posez la règle depuis l'installation. Sans elle, chacun voit les e-mails de tous et le bandeau ne peut pas reconnaître la personne.");
+
+  try {
+    var tab = await grist.docApi.fetchTable(an.table), emails = tab[an.colEmail] || [], vis = [];
+    emails.forEach(function (x, i) { if (emailLisible(x)) vis.push(i); });
+    if (vis.length === 1) {
+      var k = vis[0], nom = "";
+      if (v["users.nom_complet"] && tab[v["users.nom_complet"]]) nom = String(tab[v["users.nom_complet"]][k] || "").trim();
+      if (!nom && (v["users.prenom"] || v["users.nom"])) nom = ((tab[v["users.prenom"]] || [])[k] || "") + " " + ((tab[v["users.nom"]] || [])[k] || "");
+      var roles = v["users.role"] && tab[v["users.role"]] ? liste(tab[v["users.role"]][k]) : [];
+      ajouter("ok", "Personne connectée", "Vous êtes reconnu·e : " + (nom.trim() || "(nom non renseigné)") + (roles.length ? ", rôle : " + roles.join(", ") : ", sans rôle") + ".");
+    } else if (!vis.length) {
+      ajouter("avert", "Personne connectée", "Aucune adresse e-mail lisible : votre adresse n'est pas dans la table, ou la table est vide.", "Ajoutez la personne dans la table avec son adresse e-mail Grist.");
+    } else {
+      ajouter("avert", "Personne connectée", vis.length + " adresses sont lisibles : impossible de savoir laquelle est la vôtre.", "C'est normal pour un propriétaire du document, ou si la règle d'accès est absente. Testez avec un compte éditeur ou lecteur.");
+    }
+  } catch (e) { ajouter("erreur", "Lecture de la table des personnes", "Impossible de lire « " + an.table + " » (" + msg(e) + ").", "Vérifiez les règles d'accès de cette table."); }
+
+  if (doc.tables[T_LIENS]) {
+    try {
+      var l = lignes(await grist.docApi.fetchTable(T_LIENS));
+      var actifs = l.filter(function (x) { return x.Actif && !vide(x.Titre) && (!vide(x.Url) || !vide(x.Page)); });
+      if (actifs.length) ajouter("ok", "Liens du menu", actifs.length + " lien(s) actif(s).");
+      else ajouter("avert", "Liens du menu", "Aucun lien actif.", "Ajoutez une ligne dans « " + T_LIENS + " » avec un titre et une adresse (colonne Url) ou un numéro de page.");
+    } catch (e) { ajouter("erreur", "Lecture des liens", "Impossible de lire « " + T_LIENS + " » (" + msg(e) + ").", "Vérifiez que les règles d'accès autorisent la lecture de cette table pour tous les profils."); }
+  }
+  return r;
+}
+
+function afficherDiag(r) {
+  var z = document.getElementById("zone-diag");
+  z.textContent = "";
+  var n = { ok: 0, avert: 0, erreur: 0 };
+  r.forEach(function (x) { n[x.statut]++; });
+  z.appendChild(h("p", { texte: n.erreur + " erreur(s), " + n.avert + " point(s) à vérifier, " + n.ok + " contrôle(s) réussi(s)." }));
+  var ul = h("ul", { classe: "diag" });
+  r.forEach(function (x) {
+    ul.appendChild(h("li", {}, [
+      h("span", { classe: "badge " + x.statut, texte: { ok: "OK", avert: "À vérifier", erreur: "Erreur" }[x.statut] }),
+      " ", h("strong", { texte: x.nom + " : " }), x.detail,
+      x.aide ? h("div", { classe: "aide", texte: "Que faire : " + x.aide }) : null
+    ]));
+  });
+  z.appendChild(ul);
+  z.focus();
+}
+
+// ==========================================================
+// DÉMARRAGE
+// ==========================================================
+grist.ready({ requiredAccess: "full" });
+document.getElementById("btn-actualiser").addEventListener("click", async function () { info(""); await charger(); rendre(); });
+document.getElementById("btn-diag").addEventListener("click", async function () {
+  var b = this; b.disabled = true; info("Vérification en cours…");
+  try { afficherDiag(await diagnostiquer()); } finally { b.disabled = false; info(""); }
+});
+(async function () { await charger(); rendre(); })();
+</script>
+</body>
+</html>
